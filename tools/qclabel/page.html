@@ -1,0 +1,67 @@
+<!doctype html>
+<!-- QC labelling page (tools/qclabel/app.py). Changelog: 0.1.0 2026-11-12 first version; idea from the
+     alvik-fleet-capstone labelling page (tools/label/page.html): guesses first, Enter accepts. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QC labelling</title>
+<style>
+:root{--bg:#f7f6f2;--ink:#1f1f1e;--muted:#6b6a63;--line:#d9d7cf;--good:#1baf7a;--bad:#eb6834;--sel:#2a78d6;--card:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#1a1a19;--ink:#f0efec;--muted:#a3a29a;--line:#3a3936;--card:#242422}}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,sans-serif}
+header{display:flex;gap:16px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+header b{font-size:17px}#pos{color:var(--muted)}
+main{display:flex;gap:16px;padding:16px;flex-wrap:wrap}
+#wrap{position:relative;max-width:100%}canvas{max-width:100%;height:auto;border:1px solid var(--line);cursor:crosshair;background:#000}
+aside{flex:1;min-width:240px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.lab{font-size:22px;font-weight:600}.good{color:var(--good)}.defect{color:var(--bad)}
+kbd{border:1px solid var(--line);border-radius:4px;padding:0 5px;font-size:13px}
+ul{padding-left:18px}li.sel{color:var(--sel);font-weight:600}.muted{color:var(--muted)}
+button{font:inherit;padding:6px 12px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+</style></head><body>
+<header><b>QC labelling</b><span id="pos"></span><span id="guess" class="muted"></span></header>
+<main><div id="wrap"><canvas id="cv"></canvas></div>
+<aside>
+<div>This picture: <span id="lab" class="lab">-</span> <span id="by" class="muted"></span></div>
+<p><button id="bg">Good (G)</button> <button id="bd">Defect (D)</button> <button id="bn">Confirm, next (Enter)</button></p>
+<div>Defect boxes (drag on the picture to draw one):</div><ul id="regions"></ul>
+<p class="muted"><kbd>1</kbd>-<kbd>5</kbd> type of the selected box: <span id="types"></span><br>
+<kbd>Delete</kbd> remove the selected box &middot; <kbd>&larr;</kbd> <kbd>&rarr;</kbd> previous / next</p>
+<p class="muted">Saved after every change in qc_labels.json next to the pictures.</p>
+</aside></main>
+<script>
+let files=[],labels={},defects=[],useGuess=false,i=0,cur=null,sel=-1,img=new Image(),drag=null;
+const cv=document.getElementById('cv'),cx=cv.getContext('2d');
+async function load(){const r=await (await fetch('/api/list')).json();files=r.files;labels=r.labels;defects=r.defects;useGuess=r.guesses;
+ document.getElementById('types').textContent=defects.map((d,k)=>(k+1)+' '+d).join(', ');
+ i=Math.max(0,files.findIndex(f=>!labels[f]));if(i<0)i=0;show();}
+async function show(){if(!files.length){document.getElementById('pos').textContent='no pictures';return;}
+ const f=files[i];document.getElementById('pos').textContent=(i+1)+' / '+files.length+'  '+f+'  ('+Object.keys(labels).length+' labelled)';
+ cur=labels[f]?JSON.parse(JSON.stringify(labels[f])):null;document.getElementById('guess').textContent='';
+ if(!cur&&useGuess){const g=await (await fetch('/api/guess?f='+encodeURIComponent(f))).json();
+  if(g){cur={label:g.label,regions:g.regions,by:'guess'};document.getElementById('guess').textContent='guess from the model: score '+g.score.toFixed(2)+' (threshold '+g.threshold.toFixed(2)+')';}}
+ if(!cur)cur={label:null,regions:[],by:'person'};sel=cur.regions.length?0:-1;
+ img.onload=()=>{cv.width=img.width;cv.height=img.height;draw();};img.src='/img/'+encodeURIComponent(f);}
+function draw(){cx.drawImage(img,0,0);cur.regions.forEach((r,k)=>{cx.lineWidth=2;cx.strokeStyle=k==sel?'#2a78d6':'#eb6834';cx.strokeRect(r.x,r.y,r.w,r.h);
+  cx.fillStyle=cx.strokeStyle;cx.font='13px system-ui';cx.fillText(r.type,r.x,r.y-4);});
+ if(drag&&drag.w){cx.strokeStyle='#2a78d6';cx.setLineDash([4,3]);cx.strokeRect(drag.x,drag.y,drag.w,drag.h);cx.setLineDash([]);}
+ const l=document.getElementById('lab');l.textContent=cur.label||'not labelled';l.className='lab '+(cur.label||'');
+ document.getElementById('by').textContent=cur.by=='guess'?'(computer guess: confirm or fix)':'';
+ document.getElementById('regions').innerHTML=cur.regions.map((r,k)=>'<li class="'+(k==sel?'sel':'')+'">'+r.type+' at '+Math.round(r.x)+', '+Math.round(r.y)+' ('+Math.round(r.w)+' x '+Math.round(r.h)+' px)</li>').join('')||'<li class="muted">none</li>';}
+async function save(by){if(!cur.label)return false;cur.by=by||'person';const f=files[i];
+ const r=await (await fetch('/api/label',{method:'POST',body:JSON.stringify({file:f,label:cur.label,regions:cur.regions,by:cur.by})})).json();
+ if(r.ok)labels[f]=r.saved;return r.ok;}
+function pt(e){const b=cv.getBoundingClientRect();return [(e.clientX-b.left)*cv.width/b.width,(e.clientY-b.top)*cv.height/b.height];}
+cv.onmousedown=e=>{const [x,y]=pt(e);drag={x0:x,y0:y,x:x,y:y,w:0,h:0};};
+cv.onmousemove=e=>{if(!drag)return;const [x,y]=pt(e);drag.x=Math.min(x,drag.x0);drag.y=Math.min(y,drag.y0);drag.w=Math.abs(x-drag.x0);drag.h=Math.abs(y-drag.y0);draw();};
+cv.onmouseup=e=>{if(drag&&drag.w>4&&drag.h>4){cur.regions.push({x:drag.x,y:drag.y,w:drag.w,h:drag.h,type:'unknown'});sel=cur.regions.length-1;cur.label='defect';save();}
+ else if(drag){const [x,y]=pt(e);sel=cur.regions.findIndex(r=>x>=r.x&&x<=r.x+r.w&&y>=r.y&&y<=r.y+r.h);}drag=null;draw();};
+function setLab(l){cur.label=l;if(l=='good'){cur.regions=[];sel=-1;}save();draw();}
+document.getElementById('bg').onclick=()=>setLab('good');document.getElementById('bd').onclick=()=>setLab('defect');
+document.getElementById('bn').onclick=()=>next();
+async function next(){if(await save('person')){i=Math.min(files.length-1,i+1);show();}}
+document.onkeydown=e=>{const k=e.key;
+ if(k=='g'||k=='G')setLab('good');else if(k=='d'||k=='D')setLab('defect');else if(k=='Enter')next();
+ else if(k=='ArrowRight'){i=Math.min(files.length-1,i+1);show();}else if(k=='ArrowLeft'){i=Math.max(0,i-1);show();}
+ else if((k=='Delete'||k=='Backspace')&&sel>=0){cur.regions.splice(sel,1);sel=cur.regions.length-1;save();draw();}
+ else if(k>='1'&&k<='9'&&sel>=0&&defects[+k-1]){cur.regions[sel].type=defects[+k-1];save();draw();}};
+load();
+</script></body></html>

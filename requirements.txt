@@ -1,0 +1,10 @@
+# AnomalyDetection - pinned to the versions the first build was tested with (2026-11-12, Python 3.13, Linux).
+#   python -m pip install -r requirements.txt
+# All of these have wheels for Windows, macOS, Linux and 64-bit Raspberry Pi OS (aarch64).
+numpy==2.5.3
+scipy==1.18.1
+opencv-python==5.0.0.93
+onnxruntime==1.29.0
+onnx==1.23.2            # only for tools/get_backbone.py (cutting the pretrained ResNet-18)
+matplotlib==3.11.2      # charts (learning curve, score spreads)
+pytest==9.1.1           # tests

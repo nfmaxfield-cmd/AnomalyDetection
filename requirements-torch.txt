@@ -1,0 +1,5 @@
+# OPTIONAL: PyTorch backbone (setting "backbone": "torch") and the CentreNet detector training in tools/detector.
+# NOT tested in the first build (PyTorch could not be installed in the build sandbox). CPU-only wheels:
+#   python -m pip install -r requirements-torch.txt --index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
