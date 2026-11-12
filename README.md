@@ -9,7 +9,8 @@ Maxfield (URI systems engineering) for Dr. Sodhi's Machine Vision team (Josh S a
 public under the MIT licence.
 
 **Start here:** [docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md) (step by step, for the station).
-First build's results and limits: [docs/build-reports/2026-11-12-first-build.md](docs/build-reports/2026-11-12-first-build.md).
+Current results, limits and what the independent audit changed: [docs/build-reports/2026-11-12-audit-fixes.md](docs/build-reports/2026-11-12-audit-fixes.md)
+(first build: [docs/build-reports/2026-11-12-first-build.md](docs/build-reports/2026-11-12-first-build.md)).
 
 ## Premise
 
@@ -64,7 +65,7 @@ First build's results and limits: [docs/build-reports/2026-11-12-first-build.md]
 
 ## Quick start (no hardware: computer-generated pictures)
 
-In a command window, in this folder (Python 3.10+):
+In a command window, in this folder (Python 3.10 to 3.13; tested on 3.11 and 3.13):
 
 ```
 python -m pip install -r requirements.txt
@@ -113,31 +114,39 @@ Without `tools/get_backbone.py` the program still runs, with simpler hand-made f
 | `run` | the live station: waits for the arm, answers each part |
 | `inspect <image>` | judge one picture file, print the decision message |
 | `camera-setup` | lock exposure, focus and white balance with sliders |
-| `calibrate-mm` | (switch, off) millimetres per pixel from a card of known size |
+| `camera-check` | day-one webcam test: settings hold, no old frames in a burst, no automatic exposure |
+| `make-card` | the printable checkerboard calibration card (PDF and PNG) |
+| `calibrate-camera` | one-time lens calibration and millimetres per pixel from the card at the spot |
+| `calibrate-mm` | (switch, off) millimetres per pixel from a card of known size (kept; `calibrate-camera` does this now) |
 
 ## Results on computer-generated pictures
 
-See the build report for the full table, method and limits. Summary (pretrained ResNet-18, 60 good
-training pictures per shape and face; numbers filled from `docs/results/synthetic/`):
+Two simulated scenes (`qc/sim.py`, setting `sim_scene`): the first build's **easy** scene, and the
+**hard** scene added after the audit (light fixed in the room, a reflection, more part-to-part variation,
+faint handling marks on good parts, a noisier JPEG camera, looser placement), now the default. Pretrained
+ResNet-18, 60 good training pictures per shape and face, all 3 shapes x 2 faces; full tables in the
+audit-fixes report.
 
-| defect type | scratch | chip | dent | missing corner | stain | good parts rejected |
-|---|---|---|---|---|---|---|
-| normal size | 60/60 | 60/60 | 60/60 | 60/60 | 60/60 | 1/240 |
-| subtle (half size and contrast) | 56/60 | 60/60 | 59/60 | 60/60 | 60/60 | 1/240 |
+| scene | code | normal caught | subtle caught | faint caught | good parts scrapped (by score + answered unsure) |
+|---|---|---|---|---|---|
+| easy | first build | 300/300 (100 %) | 295/300 (98 %) | 157/300 (52 %) | 1/240 (1 + 0) |
+| easy | **now** | **300/300 (100 %)** | **295/300 (98 %)** | **155/300 (52 %)** | **1/240 (1 + 0)** |
+| hard | first build | 285/300 (95 %) | 175/300 (58 %) | 52/300 (17 %) | 11/240 (11 + 0) |
+| hard | **now** | **282/300 (94 %)** | **171/300 (57 %)** | **52/300 (17 %)** | **6/240 (6 + 0)** |
 
-Caught / tested over 3 shapes x 2 faces. The background-drift check flagged all 80 drifted pictures and
-raised no false alarm on 45 normal ones.
+Caught / tested over 3 shapes x 2 faces, 10 per defect type and severity each (subtle = half size and contrast, faint = a quarter). "First build" = the first version's code on the same pictures. The background-drift check flagged every drifted picture and raised no false alarm in both scenes.
 
-These are **computer-generated** parts and defects: they show the software works end to end and what it
-can tell apart in principle; real parts will be harder. Nothing here was tested with a real webcam, a
-real arm or a Raspberry Pi yet.
+These are **computer-generated** parts and defects: they show the software works end to end and roughly
+what it can tell apart; real parts will differ. Nothing here was tested with a real webcam, a real arm or
+a Raspberry Pi yet.
 
 ## Layout
 
 ```
 qc/            the station: sim, background, capture, straighten, features, model, threshold,
-               handoff, log, station, train, cli (+ calib, clock, locate_detector: switched off)
-tools/         get_backbone.py, evaluate_synthetic.py, arm_client_example.py, qclabel/ (labelling page),
+               handoff, log, station, train, cli, camcheck (camera check), lens (checkerboard card)
+               (+ calib, clock, locate_detector: switched off)
+tools/         get_backbone.py, evaluate_synthetic.py, arm_client_example.py, audit_pictures.py, qclabel/,
                detector/, label/, recognition/, calibrate_floor.py  (copied from Nick's robot project,
                robot features switched off)
 tests/         pytest, computer-generated pictures only
@@ -146,8 +155,13 @@ docs/          SETUP-GUIDE.md, build-reports/, results/, screenshots/
 
 Kept but switched off (settings in `qc_config.json`, defaults in `qc/config.py`): finding the part with
 the CentreNet detector instead of the empty reference (`locate_with_detector`), lining up recorded video
-with an arm log on another clock (`clock_lineup`), defect sizes in mm (`px_to_mm`), and the robot
-features of the copied labelling studio (`QC_ROBOT_FEATURES=1`).
+with an arm log on another clock (`clock_lineup`), defect sizes in mm from a plain card (`px_to_mm`; the
+checkerboard calibration now gives mm), the robot features of the copied labelling studio
+(`QC_ROBOT_FEATURES=1`), and since the audit fixes: the first build's way of deciding a picture with a
+warning from its score alone (`warnings_make_unsure: false`), training without shifted copies
+(`train_shifts_px: []`), the first build's direct camera reads (`camera_reader_thread: false`, now with a
+buffer drain), the easy simulator scene (`sim_scene: "easy"`), and two light corrections tried on the hard
+scene and left off because they did not help (`light_field`, `flatten_light`).
 
 ## Tests
 

@@ -2,6 +2,13 @@
 
 Changelog
   0.1.0  2026-11-12  first version.
+  0.2.0  2026-11-12  audit fixes: M8 at least min_holdout (20) pictures held back and the count checked BEFORE
+                     a model is saved; M5 every training picture is scored against the others (leave one
+                     out) and the ones that look unlike the rest are listed by name; M6 warnings for parts
+                     that are small in the picture or hard to tell from the backdrop; H6 the empty reference
+                     used for training is kept with the model; H2 the threshold gets the expected defect
+                     rate, the false-reject cap and file names; M7 the learning curve judges "enough" by the
+                     good-only threshold settling (needs no damaged parts) and says when its damage is painted.
 
     res = train(cfg, root, "square", "top")          # model + held-out scores + threshold (from data)
     th = calibrate(cfg, root, "square", "top")       # threshold again (e.g. after adding damaged parts)
@@ -32,14 +39,13 @@ def read(paths):
     return [cv2.imread(p) for p in paths]
 
 
-def split(paths, holdout_fraction, seed=0):
-    """Fixed shuffle so the same pictures are held out every time; at least 5 held out (when there are
-    at least 10 pictures), never more than half."""
+def split(paths, holdout_fraction, seed=0, min_holdout=20):
+    """Fixed shuffle so the same pictures are held out every time; at least min_holdout held out (audit M8:
+    with 12 held-out parts the false-reject rate can be several times the target), never more than half."""
     rng = np.random.default_rng(seed)
     idx = rng.permutation(len(paths))
     k = int(round(len(paths) * holdout_fraction))
-    if len(paths) >= 10:
-        k = max(k, 5)
+    k = max(k, min(int(min_holdout), len(paths) // 2))
     k = min(k, len(paths) // 2)
     hold = sorted(paths[i] for i in idx[:k])
     tr = sorted(paths[i] for i in idx[k:])
@@ -73,29 +79,77 @@ def score_frames(model, ref, frames, backbone):
     return sc, maps
 
 
+MIN_CONTRAST = 3.0      # [chosen] part / backdrop difference below 3x the camera noise counts as "hard to see"; not DOE
+MIN_DETAIL = 1.0        # [fixed] a crop smaller than the network's 224 px input is enlarged: no detail is added
+
+
+def setup_warnings(m, cfg):
+    """Plain warnings about the camera set-up, from the training pictures (audit M6)."""
+    out = []
+    if m.meta.get("train_no_part"):
+        out.append("no part found in %d training picture(s): %s. If the parts are dark, the black backdrop hides "
+                   "them: use a light backdrop for dark parts." % (len(m.meta["train_no_part"]),
+                                                                  ", ".join(map(str, m.meta["train_no_part"][:8]))))
+    c = [x for x in m.meta.get("train_contrast", []) if x is not None]
+    if c and float(np.median(c)) < MIN_CONTRAST:
+        out.append("the part is hard to tell from the backdrop (contrast %.1f, want at least %.1f): dark parts need a "
+                   "light backdrop (SETUP-GUIDE step 3)." % (float(np.median(c)), MIN_CONTRAST))
+    out_px = int(cfg.get("canonical_px", 224))
+    if m.crop_px and m.crop_px < MIN_DETAIL * out_px:
+        fw = (m.meta.get("frame_size") or [0])[0]
+        out.append("the part is small in the picture (%d px across%s): small defects will be missed. Lower the camera "
+                   "or use a camera height per size class so each part fills at least a third of the picture's width."
+                   % (m.crop_px, ", %.0f %% of the width" % (100.0 * m.crop_px / fw) if fw else ""))
+    return out
+
+
 def train(cfg, root, shape, face, backbone=None, log=print):
     folder = os.path.join(root, "data", "good", shape, face)
     paths = list_images(folder)
-    if len(paths) < 6:
-        raise ValueError("Only %d good pictures in %s; collect more first (collect-good)." % (len(paths), folder))
-    tr, hold = split(paths, float(cfg.get("holdout_fraction", 0.2)))
+    tr, hold = split(paths, float(cfg.get("holdout_fraction", 0.2)), min_holdout=int(cfg.get("min_holdout", 20)))
+    if len(paths) < 6 or len(hold) < 3:
+        raise ValueError("Only %d good pictures in %s; collect more first (collect-good): at least 6, better 50-100 "
+                         "so that 20 can be held back to set the threshold." % (len(paths), folder))
     ref = empty_ref(root)
     backbone = backbone or features.make(cfg, root)
     if getattr(backbone, "warning", None):
         log("WARNING: " + backbone.warning)
     log("Training %s/%s on %d good pictures (%d held back to set the threshold), features: %s" % (
         shape, face, len(tr), len(hold), backbone.name))
+    if len(hold) < int(cfg.get("min_holdout", 20)):
+        log("NOTE: only %d pictures held back (want %d): the threshold is rough until more good pictures are "
+            "collected." % (len(hold), int(cfg.get("min_holdout", 20))))
     m = NormalModel(shape, face, cfg)
-    canon = m.prepare(read(tr), ref)
+    names = [os.path.basename(p) for p in tr]
+    canon = m.prepare(read(tr), ref, names=names)
     m.fit(canon, backbone)
     out = os.path.join(root, "models", shape, face)
-    m.meta["train_files"] = [os.path.basename(p) for p in tr]
+    kept = [names[k] for k in m.kept_index]
+    m.meta["train_files"] = kept
     m.meta["holdout_files"] = [os.path.basename(p) for p in hold]
+    loo = m.self_scores(canon, backbone)
+    m.meta["train_loo_scores"] = [float(x) for x in loo] if loo is not None else None
+    from . import lens as lensmod
+    lc = lensmod.load_for(cfg, root)
+    m.meta["lens_id"] = lc.id if lc is not None else None              # pictures in data/ were corrected with it
+    m.meta["setup_warnings"] = setup_warnings(m, cfg)
     m.save(out)
+    ref.save(os.path.join(out, "empty_at_training.npz"))       # the empty spot this model was trained with (H6)
     log("Symmetry of the outline: %s; model saved in %s" % (
         "round" if m.order == 0 else "%d-fold" % m.order, out))
+    for w in m.meta["setup_warnings"]:
+        log("WARNING: " + w)
     th = calibrate(cfg, root, shape, face, model=m, backbone=backbone, log=log)
-    return dict(model=out, n_train=len(tr), n_holdout=len(hold), order=m.order, threshold=th)
+    odd = []
+    if loo is not None:
+        odd = [dict(name=n, score=float(x)) for n, x in zip(kept, loo) if x > th["threshold"]]
+        if odd:
+            log("CHECK: %d training picture(s) look unlike the other good pictures (each scored against the others "
+                "is above the threshold): %s. Open them: a damaged part, an empty spot or another part in the good "
+                "folder should be deleted, then train again." % (len(odd), ", ".join(
+                    "%s (%.2f)" % (o["name"], o["score"]) for o in sorted(odd, key=lambda o: -o["score"])[:10])))
+    return dict(model=out, n_train=len(kept), n_holdout=len(hold), order=m.order, threshold=th,
+                odd_training_pictures=odd, setup_warnings=m.meta["setup_warnings"])
 
 
 def calibrate(cfg, root, shape, face, model=None, backbone=None, log=print):
@@ -113,7 +167,11 @@ def calibrate(cfg, root, shape, face, model=None, backbone=None, log=print):
     missed = [os.path.basename(p) for p, s in zip(bpaths, bad) if not np.isfinite(s)]
     th = thmod.from_scores(good[np.isfinite(good)], bad[np.isfinite(bad)],
                            float(cfg.get("target_false_reject", 0.01)),
-                           float(cfg.get("cost_bad_accepted", 10.0)), float(cfg.get("cost_good_rejected", 1.0)))
+                           float(cfg.get("cost_bad_accepted", 10.0)), float(cfg.get("cost_good_rejected", 1.0)),
+                           expected_defect_rate=float(cfg.get("expected_defect_rate", 0.05)),
+                           max_false_reject=cfg.get("max_false_reject"),
+                           good_names=[os.path.basename(p) for p, x in zip(hold, good) if np.isfinite(x)],
+                           bad_names=[os.path.basename(p) for p, x in zip(bpaths, bad) if np.isfinite(x)])
     th.update(shape=shape, face=face, good_scores=[float(x) for x in good],
               damaged_scores={os.path.basename(p): float(s) for p, s in zip(bpaths, bad)},
               damaged_no_part=missed)
@@ -181,7 +239,8 @@ def learning_curve(cfg, root, shape, face, sizes=(5, 10, 20, 40, 80), repeats=3,
     onto held-out good pictures (proxy). Returns (rows, info)."""
     gdir = os.path.join(root, "data", "good", shape, face)
     paths = list_images(gdir)
-    pool, hold = split(paths, max(0.2, float(cfg.get("holdout_fraction", 0.2))), seed)
+    pool, hold = split(paths, max(0.2, float(cfg.get("holdout_fraction", 0.2))), seed,
+                       min_holdout=int(cfg.get("min_holdout", 20)))
     ref = empty_ref(root)
     backbone = backbone or features.make(cfg, root)
     hold_frames = read(hold)
@@ -195,7 +254,10 @@ def learning_curve(cfg, root, shape, face, sizes=(5, 10, 20, 40, 80), repeats=3,
             loc = ref.part_mask(f)
             if loc is not None:
                 bad_frames.append(paint_damage(f, loc.mask, rng)[0])
-        bad_kind = "damage painted on held-out good pictures (proxy, %d)" % len(bad_frames)
+        bad_kind = "damage painted on held-out good pictures (stand-in, %d)" % len(bad_frames)
+        log("NOTE: no damaged pictures yet, so damage is PAINTED on held-out good pictures as a stand-in (strong "
+            "contrast: easier to catch than real damage). \"Enough\" is judged by the good-only threshold settling, "
+            "which needs no damaged parts.")
     sizes = [n for n in sizes if n <= len(pool)]
     rows = []
     for n in sizes:
@@ -209,23 +271,33 @@ def learning_curve(cfg, root, shape, face, sizes=(5, 10, 20, 40, 80), repeats=3,
             g, b = g[np.isfinite(g)], b[np.isfinite(b)]
             th = thmod.from_scores(g, None, float(cfg.get("target_false_reject", 0.01)))
             row = dict(n=n, repeat=r, auroc=auroc(g, b), separation=separation(g, b),
-                       caught_at_threshold=float((b > th["threshold"]).mean()),
+                       caught_at_threshold=float((b > th["threshold"]).mean()), thr_good=float(th["threshold"]),
                        good_p50=float(np.median(g)), good_max=float(g.max()), bad_min=float(b.min()))
             rows.append(row)
-            log("n=%3d draw %d: AUROC %.3f, separation %+.2f, damaged caught at the good-only threshold %.0f %%" % (
-                n, r + 1, row["auroc"], row["separation"], 100 * row["caught_at_threshold"]))
+            log("n=%3d draw %d: good-only threshold %.2f, AUROC %.3f, separation %+.2f, damaged caught at that "
+                "threshold %.0f %%" % (n, r + 1, row["thr_good"], row["auroc"], row["separation"],
+                                       100 * row["caught_at_threshold"]))
     info = dict(shape=shape, face=face, damaged=bad_kind, n_holdout=len(hold_frames), pool=len(pool),
-                backbone=backbone.name, suggestion=suggest_n(rows))
+                backbone=backbone.name, suggestion=suggest_n(rows, "thr_good", higher_is_better=False),
+                suggestion_damaged=suggest_n(rows))
     return rows, info
 
 
-def suggest_n(rows, metric="caught_at_threshold"):
+METRIC_WORDS = {"caught_at_threshold": "share of damaged parts caught",
+                "thr_good": "good-only threshold"}
+
+
+def suggest_n(rows, metric="caught_at_threshold", higher_is_better=True):
     """The smallest n from which the curve has levelled off: its median, and the median at EVERY larger n,
     is within the draw-to-draw noise of the best median. Noise = the median (over n) of the spread between
     random draws at one n. The data decides; if only the largest n qualifies, the curve may still be
-    climbing (or is too noisy to tell): collect more pictures or use more draws."""
+    climbing (or is too noisy to tell): collect more pictures or use more draws.
+    metric "thr_good" (higher_is_better=False): the good-only threshold falls as more good pictures show the
+    normal spread, and settles once enough are seen; this needs no damaged parts (audit M7)."""
+    sign = 1.0 if higher_is_better else -1.0
+    words = METRIC_WORDS.get(metric, metric)
     ns = sorted({r["n"] for r in rows})
-    vals = {n: [r[metric] for r in rows if r["n"] == n] for n in ns}
+    vals = {n: [sign * r[metric] for r in rows if r["n"] == n] for n in ns}
     med = {n: float(np.median(v)) for n, v in vals.items()}
     spreads = [float(np.ptp(v)) for v in vals.values() if len(v) > 1]
     noise = float(np.median(spreads)) if spreads else 0.0
@@ -234,11 +306,11 @@ def suggest_n(rows, metric="caught_at_threshold"):
     if ok and ok[0] != ns[-1]:
         n = ok[0]
         text = ("Enough at %d good pictures: from there on the median %s stays within %.3f (the spread "
-                "between random draws) of the best, %.3f." % (n, metric, noise, best))
+                "between random draws) of the best, %.3f." % (n, words, noise, sign * best))
         if n == ns[0] and noise >= best - min(med.values()):
             text += (" The whole curve is flat within that spread, so this measure cannot tell the sizes apart;"
-                     " more damaged pictures (or --repeats) make it finer.")
-        return dict(n=n, metric=metric, value=med[n], noise=noise, text=text)
-    return dict(n=None, metric=metric, value=med[ns[-1]] if ns else None, noise=noise,
+                     " more pictures (or --repeats) make it finer.")
+        return dict(n=n, metric=metric, value=sign * med[n], noise=noise, text=text)
+    return dict(n=None, metric=metric, value=sign * med[ns[-1]] if ns else None, noise=noise,
                 text="Not settled by %s pictures (or too noisy to tell): collect more good pictures, or run the "
                      "curve with more --repeats." % (ns[-1] if ns else "?"))

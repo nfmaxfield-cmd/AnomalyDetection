@@ -2,6 +2,7 @@
 
 Changelog
   0.1.0  2026-11-12  first version.
+  0.1.1  2026-11-12  chosen numbers marked [chosen] (audit L7); no change in behaviour.
 
 Steps, for a part found against the empty reference (background.py):
   1. Outline -> radius at every angle around the part's centre, r(theta).
@@ -42,7 +43,7 @@ def radius_profile(contour, centre, bins=360):
     prof = np.full(bins, np.nan)
     np.fmax.at(prof, idx, r)
     ok = np.isfinite(prof)
-    if ok.sum() < bins // 4:
+    if ok.sum() < bins // 4:                    # [chosen] a quarter of the angle bins must be seen; not DOE
         raise ValueError("outline too small to measure")
     x = np.arange(bins)
     prof = np.interp(x, x[ok], prof[ok], period=bins)
@@ -55,7 +56,7 @@ def outline_symmetry(contour, centre, order=None):
     r = radius_profile(contour, centre)
     F = np.fft.rfft(r - r.mean())
     mags = np.abs(F) / len(r) * 2 / r.mean()
-    noise = float(np.median(mags[13:60])) + 1e-9
+    noise = float(np.median(mags[13:60])) + 1e-9    # [chosen] harmonics 13-59 = the outline's noise floor; not DOE
     if order is None:
         order = 0
         for k in HARMONICS:
@@ -148,7 +149,7 @@ def _match(g, ref):
     if s not in _HANN:
         _HANN[s] = cv2.createHanningWindow((s, s), cv2.CV_32F)
     (dx, dy), _ = cv2.phaseCorrelate(ref, g, _HANN[s])
-    if abs(dx) > s / 8 or abs(dy) > s / 8:
+    if abs(dx) > s / 8 or abs(dy) > s / 8:      # [chosen] shifts beyond 1/8 of the picture are false matches; not DOE
         dx = dy = 0.0
     M = np.float32([[1, 0, -dx], [0, 1, -dy]])
     gs = cv2.warpAffine(g, M, (s, s), borderMode=cv2.BORDER_REPLICATE)
@@ -215,7 +216,7 @@ def straighten(frame, loc, ref_img, crop_px, out_px, order, fine_span=5.0, fine_
             ia = cv2.warpAffine(im0, M, (out_px, out_px), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
             sc.append((_match(_prep(ia, 112, inner, True), r_in)[0], float(a)))
         sc.sort(reverse=True)
-        cands = [a for _, a in sc[:3]]
+        cands = [a for _, a in sc[:3]]          # [chosen] best 3 coarse angles refined; not DOE
         scored = [inner_score(a, ROUND_STEP_DEG, 0.5) for a in cands]
     inner_corr, a_best = max(scored)
     # final fine alignment on the whole detail picture: the outline fixes the angle where the face can't

@@ -3,6 +3,9 @@
 Changelog
   0.1.0  2026-11-12  first version: disc / square / hexagon, top and bottom faces, five defect types,
                      empty frames, four kinds of background drift, bursts with motion blur.
+  0.2.0  2026-11-12  audit fixes (H3): a HARDER scene, now the default (scene="hard"); the first
+                     build's scene is kept as scene="easy" (switch: setting "sim_scene", or
+                     sim.DEFAULT_SCENE). Ported from the independent audit's hard.py.
 
 The scene copies the agreed setup: a fixed webcam looking straight down at a fixed spot on a matte black
 backdrop, lit by a ring light around the lens. The part lands near the spot (a few pixels of placement
@@ -17,6 +20,18 @@ scene: they let the software notice a bumped camera on an otherwise featureless 
     f = sim.render("hexagon", "bottom", defect="chip", seed=4)
     e = sim.empty_frame(seed=5, drift="stray_object")
     frames, settled = sim.burst("disc", "top", seed=6)
+
+Two scenes (setting "sim_scene"; every function takes scene=None -> DEFAULT_SCENE):
+  easy  the first build's scene: flat grey part, shading turns with the part, 0.6 % size and 2 % brightness
+        spread, 0.4 px feature offset, placement sd 3 px, sensor noise sd 2 grey levels.
+  hard  (default) the easy scene plus, all at once (the audit's "all together"):
+        light 10 % brighter on one side, FIXED in the picture (does not turn with the part);
+        a reflection spot of 40 grey levels fixed in the picture, on the part;
+        more part-to-part variation: 6 % brightness, a brushed grain, 1.2 px print / feature offset;
+        1-3 faint handling marks (6-14 grey levels) on every part, good ones included (must be accepted);
+        placement sd 15 px; camera noise sd 4, webcam sharpening, JPEG quality 75.
+  Defect severities used in the reports: 1.0 normal, 0.5 "subtle" (half size and contrast), 0.25 "faint"
+  (quarter size and contrast).
 
 All numbers in this file describe the made-up scene; none of them is used by the inspection itself.
 """
@@ -36,10 +51,55 @@ SS = 4                           # supersampling for smooth outlines
 SIZE = {"disc": 108.0, "square": 92.0, "hexagon": 112.0}     # radius / half side / circumradius in px
 FIDUCIALS = ((60, 60), (580, 420))
 TABLE_X = 612                    # the table shows from this column to the right edge
+SCENES = ("easy", "hard")
+DEFAULT_SCENE = "hard"           # the scene reported results use; "easy" = the first build's scene
+# the hard scene's factors (made-up numbers that describe the scene, from the audit's hard.py)
+HARD = dict(grad=0.10, spec=40.0, var_bright=0.06, grain=9.0, offset=1.2, marks=(1, 3), mark_grey=(6.0, 14.0),
+            place_sd=15.0, noise_sd=4.0, sharpen=0.6, jpeg=75)
+SEVERITIES = (("normal", 1.0), ("subtle", 0.5), ("faint", 0.25))
 
 
 def _rng(seed):
     return np.random.default_rng(seed)
+
+
+def _scene(scene):
+    scene = scene or DEFAULT_SCENE
+    if scene not in SCENES:
+        raise ValueError("unknown scene %r (easy or hard)" % scene)
+    return scene
+
+
+def _scene_light(frame, pa, scene):
+    """Hard scene: things FIXED in the picture (they do not turn with the part): a light gradient over the
+    whole picture and a reflection spot on the part."""
+    if scene != "hard":
+        return frame
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    frame = frame * (1 + HARD["grad"] * (xx - SPOT[0]) / 110.0).clip(0.6, 1.4)[..., None]
+    if pa is not None:
+        blob = np.exp(-((xx - 350) ** 2 + (yy - 215) ** 2) / (2 * 22.0 ** 2))
+        frame = frame + (HARD["spec"] * blob * pa)[..., None]
+    return frame
+
+
+def _hard_part(img, alpha, seed):
+    """Hard scene: more part-to-part variation and faint handling marks on every part (good ones too)."""
+    r2 = _rng(seed + 77777)
+    img = img * (1 + r2.normal(0, HARD["var_bright"]))
+    g = r2.normal(0, HARD["grain"], img.shape[:2]).astype(np.float32)
+    img = img + cv2.GaussianBlur(g, (0, 0), sigmaX=4.0, sigmaY=0.6)[..., None]       # brushed finish
+    dx, dy = r2.normal(0, HARD["offset"], 2)
+    img = cv2.warpAffine(img, np.float32([[1, 0, dx], [0, 1, dy]]), img.shape[:2][::-1], borderMode=cv2.BORDER_REFLECT)
+    for _ in range(int(r2.integers(HARD["marks"][0], HARD["marks"][1] + 1))):
+        x, y = _point_on_part(alpha, r2, 14)
+        a = r2.uniform(0, math.pi)
+        L = r2.uniform(10, 30)
+        layer = np.zeros(alpha.shape, np.float32)
+        cv2.line(layer, (int(x - L / 2 * math.cos(a)), int(y - L / 2 * math.sin(a))),
+                 (int(x + L / 2 * math.cos(a)), int(y + L / 2 * math.sin(a))), 1.0, 1, cv2.LINE_AA)
+        img = img + (r2.choice([-1, 1]) * r2.uniform(*HARD["mark_grey"]) * layer * alpha)[..., None]
+    return img
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -294,22 +354,37 @@ def _place(back, img, alpha, angle, centre, extra=None):
     return out, pa[..., 0], ex
 
 
-def _finish(img, rng, gain_sd=0.02, noise_sd=2.0, blur=0.6):
+def _finish(img, rng, gain_sd=0.02, noise_sd=2.0, blur=0.6, scene="easy"):
     img = img * (1 + rng.normal(0, gain_sd))                   # small lighting noise frame to frame
     if blur > 0:
         img = cv2.GaussianBlur(img, (0, 0), blur)
+    if scene == "hard":
+        img = img + rng.normal(0, HARD["noise_sd"], img.shape)
+        img = img + HARD["sharpen"] * (img - cv2.GaussianBlur(img, (0, 0), 1.5))      # webcam sharpening halo
+        img = np.clip(img, 0, 255).astype(np.uint8)
+        return cv2.imdecode(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, HARD["jpeg"]])[1], 1)
     img = img + rng.normal(0, noise_sd, img.shape)
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
+def placement(seed, scene=None):
+    """Where the arm puts part `seed` down: (x, y) near the spot (sd 3 px easy, 15 px hard)."""
+    sd = HARD["place_sd"] if _scene(scene) == "hard" else 3.0
+    off = np.clip(_rng(seed + 55555).normal(0, sd, 2), -8 * sd / 3.0, 8 * sd / 3.0)
+    return (SPOT[0] + off[0], SPOT[1] + off[1])
+
+
 def render(shape, face, defect=None, seed=0, angle=None, drift=None, severity=1.0, centre=None,
-           motion_px=0.0, motion_angle=0.0, defocus=0.0, noise_seed=None):
+           motion_px=0.0, motion_angle=0.0, defocus=0.0, noise_seed=None, scene=None):
     """One picture of one part at the spot. Returns dict(frame uint8 BGR, angle, centre, part_mask,
-    defect_mask (frame px, 0..1), shape, face, defect)."""
+    defect_mask (frame px, 0..1), shape, face, defect, scene)."""
     if shape not in SHAPES or face not in FACES:
         raise ValueError("unknown shape/face %s/%s" % (shape, face))
+    scene = _scene(scene)
     rng = _rng(seed)
     img, alpha = make_part(shape, face, rng)
+    if scene == "hard":
+        img = _hard_part(img, alpha, seed)
     dm = None
     if defect:
         img, alpha, dm = apply_defect(img, alpha, shape, defect, rng, severity)
@@ -318,6 +393,8 @@ def render(shape, face, defect=None, seed=0, angle=None, drift=None, severity=1.
     if centre is None:
         off = np.clip(rng.normal(0, 3.0, 2), -8, 8)            # the arm puts it down within a few px
         centre = (SPOT[0] + off[0], SPOT[1] + off[1])
+        if scene == "hard":
+            centre = placement(seed, scene)
     back = backdrop(rng, drift)
     if drift == "light_shift":
         img = img * 0.88
@@ -330,21 +407,25 @@ def render(shape, face, defect=None, seed=0, angle=None, drift=None, severity=1.
         ker = cv2.warpAffine(ker, R, (k, k))
         ker /= ker.sum()
         frame = cv2.filter2D(frame, -1, ker)
-    out = _finish(frame, rng if noise_seed is None else _rng(noise_seed), blur=0.6 + defocus)
-    return dict(frame=out, angle=angle, centre=centre, part_mask=pmask, shape=shape, face=face,
+    frame = _scene_light(frame, pmask, scene)
+    out = _finish(frame, rng if noise_seed is None else _rng(noise_seed), blur=0.6 + defocus, scene=scene)
+    return dict(frame=out, angle=angle, centre=centre, part_mask=pmask, shape=shape, face=face, scene=scene,
                 defect=defect, defect_mask=(dmf if dmf is not None else np.zeros((H, W), np.float32)))
 
 
-def empty_frame(seed=0, drift=None):
+def empty_frame(seed=0, drift=None, scene=None):
+    scene = _scene(scene)
     rng = _rng(seed)
-    return _finish(backdrop(rng, drift), rng)
+    return _finish(_scene_light(backdrop(rng, drift), None, scene), rng, scene=scene)
 
 
-def burst(shape, face, defect=None, seed=0, n=8, angle=None):
+def burst(shape, face, defect=None, seed=0, n=8, angle=None, scene=None, drift=None, severity=1.0):
     """A burst taken right after "paused": the first frames still slide and blur, later ones have settled
     (identical apart from sensor noise). Returns (frames, list of the settled frames' indices)."""
+    scene = _scene(scene)
     rng = _rng(seed + 7919)
     base_angle = float(rng.uniform(0, 360)) if angle is None else angle
+    cx, cy = (SPOT[0] + 2, SPOT[1] - 1) if scene == "easy" else placement(seed, scene)
     k = max(2, n // 2)
     motion = (list(np.linspace(9, 0, k)) + [0.0] * (n - k))[:n]
     settled = [i for i, m in enumerate(motion) if m == 0]
@@ -352,8 +433,8 @@ def burst(shape, face, defect=None, seed=0, n=8, angle=None):
     for i, m in enumerate(motion):
         wob = rng.normal(0, 0.4 * m, 2)          # still sliding a little just after release
         r = render(shape, face, defect, seed=seed, angle=base_angle + 0.05 * m,
-                   centre=(SPOT[0] + 2 + wob[0], SPOT[1] - 1 + wob[1]), motion_px=m,
-                   motion_angle=float(rng.uniform(0, 180)),
+                   centre=(cx + wob[0], cy + wob[1]), motion_px=m,
+                   motion_angle=float(rng.uniform(0, 180)), scene=scene, drift=drift, severity=severity,
                    noise_seed=seed * 31 + i + 1)        # every frame has its own sensor noise
         frames.append(r["frame"])
     return frames, settled

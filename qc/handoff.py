@@ -2,15 +2,18 @@
 
 Changelog
   0.1.0  2026-11-12  first version: HTTP (default), stdin/stdout lines, and a file drop folder.
+  0.2.0  2026-11-12  audit fixes: "recheck" in the decision message, "force" on "empty" (H1 / H6); a request
+                     that is JSON but not an object gets an error reply instead of a dropped connection (L3).
 
 The arm's code sends a request when something happens; the reply comes back on the same channel.
 
   request                                   when                          reply
   {"cmd": "paused", "part_id": "p17",       the part is resting at the    the decision (below)
    "shape": "square", "face": "top"}        spot, this face up
-  {"cmd": "empty"}                          the spot is empty (start of   {"ok": true, "drift": {...}}
-                                            a session, or when a reply
-                                            said "empty_due": true)
+  {"cmd": "empty"}                          the spot is empty (start of   {"ok": true, ...}, or {"ok": false,
+                                            a session, or when a reply     "refused": true, "reason": ...} when
+                                            said "empty_due": true)        something is in view (old one kept)
+  {"cmd": "empty", "force": true}           after a deliberate change of backdrop / light / camera
   {"cmd": "health"}                         any time                      models, thresholds, empty age
 
 The decision message:
@@ -20,10 +23,18 @@ The decision message:
                                              # "pending" until both faces are seen
    "score": 3.91, "threshold": 6.80,         # reject when score > threshold
    "reason": "", "warnings": [],             # why, in words, when not a plain accept/reject
-   "needs_attention": false,                 # true: could not judge properly (no part, moving, drift)
+   "needs_attention": false,                 # true: could not judge properly (no part, moving, drift, blur,
+                                             # mix-up). The decision is then "reject" (setting unsure_goes_to),
+                                             # never "accept"; "reason" says why
+   "recheck": false,                         # true: waiting a moment and sending "paused" again for the same
+                                             # part_id and face may help (part was moving, blurred, at the edge)
    "empty_due": false,                       # true: please send "empty" before the next part
    "heatmap_path": "runs/.../p17_top_heat.png", "image_path": "runs/.../p17_top_frame.jpg",
-   "time": "2026-11-12T10:15:02.120", "model": "square/top 2026-11-12T09:58:11", "version": "0.1.0"}
+   "time": "2026-11-12T10:15:02.120", "model": "square/top 2026-11-12T09:58:11", "version": "0.2.0"}
+
+part_id: the same id for both faces of one part. A face sent again for an unfinished part replaces the
+earlier answer (a recheck); once a part is finished (both faces answered, or rejected by its score) the
+same id starts a new part. Without part_id the faces pair up in order and the reply carries the id used.
 
 Transports (setting "transport"):
   http   POST the request JSON to http://127.0.0.1:8765/<cmd> (or to / with "cmd" in the body).
@@ -45,6 +56,10 @@ COMMANDS = ("paused", "inspect", "empty", "health", "collect")
 
 def handle(station, req):
     """Run one request against the station; always returns a dict (errors come back as messages)."""
+    if not isinstance(req, dict):
+        return dict(ok=False, error="the request must be a JSON object such as {\"cmd\": \"paused\", ...}",
+                    decision=station.cfg.get("unsure_goes_to", "reject"), needs_attention=True,
+                    reason="request is not a JSON object")
     cmd = str(req.get("cmd", "paused")).lower()
     try:
         if cmd in ("paused", "inspect", "collect") and not (req.get("shape") and req.get("face")):
@@ -58,7 +73,7 @@ def handle(station, req):
         if cmd == "collect":
             return station.collect(req.get("part_id"), req.get("shape"), req.get("face"))
         if cmd == "empty":
-            return station.take_empty()
+            return station.take_empty(force=bool(req.get("force", False)))
         if cmd == "health":
             return station.health()
         return dict(ok=False, error="unknown cmd %r; use one of %s" % (cmd, ", ".join(COMMANDS)))
@@ -94,7 +109,7 @@ def make_http_server(station, host="127.0.0.1", port=8765):
             except ValueError:
                 return self._send(dict(ok=False, error="body is not JSON"), 400)
             p = self.path.strip("/")
-            if p:
+            if p and isinstance(req, dict):
                 req["cmd"] = p
             with lock:
                 return self._send(handle(station, req))
@@ -131,7 +146,7 @@ def serve_stdio(station, inp=None, out=None):
         except ValueError:
             rep = dict(ok=False, error="line is not JSON")
         else:
-            if str(req.get("cmd", "")).lower() in ("quit", "stop", "exit"):
+            if isinstance(req, dict) and str(req.get("cmd", "")).lower() in ("quit", "stop", "exit"):
                 break
             rep = handle(station, req)
         out.write(json.dumps(rep, default=float) + "\n")

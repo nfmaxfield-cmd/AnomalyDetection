@@ -3,6 +3,8 @@
 Changelog
   0.1.0  2026-11-12  first version: ONNX ResNet-18 (default), torchvision ResNet-18 / Wide-ResNet-50
                      (optional), hand-made features (fallback that needs nothing to download).
+  0.2.0  2026-11-12  audit fix M4: every backbone carries the SHA-256 of its weights file (models store it
+                     and refuse another network); the 8-bit file is named onnx-resnet18-int8.
 
 Three ways to get them, all giving a (N, C, 28, 28) array for N canonical 224 x 224 pictures, one
 feature vector per 8 x 8 pixel cell, each already averaged with its 3 x 3 neighbours as in PatchCore:
@@ -21,6 +23,7 @@ remaining job is "is this spot different from the same spot on good parts", whic
 mid-level features already describe; the bigger network's advantage on the varied MVTec benchmark comes
 largely from harder, uncontrolled images. The learning-curve tool can compare the two on real parts.
 """
+import hashlib
 import os
 
 import cv2
@@ -70,11 +73,22 @@ def _merge(l2, l3):
     return np.concatenate([l2, up], axis=1).astype(np.float32)
 
 
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
 class OnnxBackbone:
     name = "onnx-resnet18"
 
     def __init__(self, path):
         import onnxruntime as ort
+        if "int8" in os.path.basename(path):
+            self.name = "onnx-resnet18-int8"
+        self.sha256 = file_sha256(path)
         so = ort.SessionOptions()
         so.intra_op_num_threads = max(1, (os.cpu_count() or 2))
         self.sess = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
@@ -102,6 +116,7 @@ class TorchBackbone:
         self.body = torch.nn.Sequential(m.conv1, m.bn1, m.relu, m.maxpool, m.layer1, m.layer2)
         self.l3 = m.layer3
         self.name = "torch-" + arch
+        self.sha256 = "torchvision-%s-%s-%s" % (arch, weights, torchvision.__version__)
 
     def __call__(self, imgs, batch=8):
         out = []
@@ -118,6 +133,7 @@ class HandcraftedBackbone:
     """Fallback: per 8 x 8 cell, the mean and spread of colour (Lab) and of gradient / Laplacian
     responses at three blur scales. 36 numbers per cell; no download needed."""
     name = "handcrafted"
+    sha256 = "handcrafted-v1"
 
     def __call__(self, imgs, batch=None):
         out = []

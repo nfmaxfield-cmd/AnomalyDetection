@@ -1,5 +1,8 @@
 # First build: good-parts-only anomaly detection for the QC arm (2026-11-12)
 
+> Superseded in part by the audit fixes the same day: `docs/build-reports/2026-11-12-audit-fixes.md` (harder
+> simulated scene, threshold rule, stillness, camera path, part ids). The numbers below are the first build's.
+
 Built by Claude for Nick Maxfield; for Josh S and Chris (Dr. Sodhi's Machine Vision team, URI).
 Everything below was run on **computer-generated pictures** only (no webcam, arm or Raspberry Pi).
 Conclusions marked *(Claude's)* are mine, not yet the team's.

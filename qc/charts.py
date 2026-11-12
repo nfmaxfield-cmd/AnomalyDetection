@@ -2,6 +2,8 @@
 
 Changelog
   0.1.0  2026-11-12  first version.
+  0.2.0  2026-11-12  learning curve in two panels: the good-only threshold (decides "enough", audit M7) and
+                     the damaged-part measures; the sentence under it no longer shows a variable name (L7).
 
 Every chart carries, in its own picture: what is measured, where the data comes from, and one plain
 sentence underneath saying what it shows.
@@ -32,12 +34,14 @@ def _footer(fig, source, sentence):
 
 
 def learning_curve(rows, info, path):
+    """Two panels: left the good-only threshold (falls, then settles: that decides "enough", no damaged
+    parts needed), right how well damaged parts stand out (painted stand-ins until real ones exist)."""
     plt = _plt()
     ns = sorted({r["n"] for r in rows})
-    fig, ax = plt.subplots(figsize=(8, 5.4))
-    fig.subplots_adjust(bottom=0.33, top=0.86, left=0.09, right=0.97)
-    for key, colour, label in (("caught_at_threshold", BLUE, "damaged parts caught at the good-only threshold"),
-                               ("auroc", ORANGE, "AUROC (chance a damaged part outscores a good one)")):
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 5.4))
+    fig.subplots_adjust(bottom=0.33, top=0.84, left=0.08, right=0.98, wspace=0.28)
+
+    def band(ax, key, colour, label):
         med = [np.median([r[key] for r in rows if r["n"] == n]) for n in ns]
         lo = [np.min([r[key] for r in rows if r["n"] == n]) for n in ns]
         hi = [np.max([r[key] for r in rows if r["n"] == n]) for n in ns]
@@ -45,21 +49,30 @@ def learning_curve(rows, info, path):
         ax.plot(ns, med, color=colour, linewidth=2, marker="o", markersize=6, label=label)
         ax.annotate("%.2f" % med[-1], (ns[-1], med[-1]), textcoords="offset points", xytext=(6, 0),
                     va="center", fontsize=9, color=INK)
+    if all("thr_good" in r for r in rows):
+        band(a1, "thr_good", BLUE, "good-only threshold")
+    a1.set_ylabel("threshold (anomaly score)")
+    a1.set_title("left: the line settles when enough good parts are seen", fontsize=9, color=MUTED, loc="left")
+    for key, colour, label in (("caught_at_threshold", ORANGE, "damaged parts caught at that threshold"),
+                               ("auroc", AQUA, "AUROC (chance a damaged part outscores a good one)")):
+        band(a2, key, colour, label)
+    a2.set_ylim(0, 1.05)
+    a2.set_ylabel("share (0 to 1)")
+    a2.set_title("right: damaged parts (%s)" % ("painted stand-ins" if "stand-in" in info.get("damaged", "")
+                                                 else "real pictures"), fontsize=9, color=MUTED, loc="left")
+    a2.legend(loc="lower right", frameon=False, fontsize=8)
     sug = info.get("suggestion") or {}
+    for ax in (a1, a2):
+        if sug.get("n"):
+            ax.axvline(sug["n"], color=MUTED, linestyle="--", linewidth=1)
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(ns)
+        ax.set_xticklabels([str(n) for n in ns])
+        ax.set_xlabel("good pictures used for training (log scale)")
     if sug.get("n"):
-        ax.axvline(sug["n"], color=MUTED, linestyle="--", linewidth=1)
-        ax.text(sug["n"], 0.02, " enough: %d" % sug["n"], color=INK, fontsize=9, va="bottom")
-    ax.set_xscale("log", base=2)
-    ax.set_xticks(ns)
-    ax.set_xticklabels([str(n) for n in ns])
-    ax.set_ylim(0, 1.05)
-    ax.set_xlabel("good pictures used for training (log scale)")
-    ax.set_ylabel("share (0 to 1)")
-    ax.legend(loc="lower right", frameon=False, fontsize=9)
-    fig.suptitle("Learning curve, %s / %s: how well damaged parts stand out vs. number of good pictures" % (
-        info["shape"], info["face"]), fontsize=11, color=INK, x=0.01, ha="left")
-    ax.set_title("line = median of %d random draws, band = lowest to highest draw" % max(
-        1, len(rows) // max(1, len(ns))), fontsize=9, color=MUTED, loc="left")
+        a1.text(sug["n"], a1.get_ylim()[1], " enough: %d" % sug["n"], color=INK, fontsize=9, va="top")
+    fig.suptitle("Learning curve, %s / %s: lines = median of %d random draws, bands = lowest to highest draw" % (
+        info["shape"], info["face"], max(1, len(rows) // max(1, len(ns)))), fontsize=11, color=INK, x=0.01, ha="left")
     _footer(fig, "%s; %d held-out good pictures; damaged: %s; features: %s." % (
         info.get("source", "pictures in data/good"), info["n_holdout"], info["damaged"], info["backbone"]),
         sug.get("text", ""))

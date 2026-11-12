@@ -2,6 +2,7 @@
 
 Changelog
   0.1.0  2026-11-12  first version.
+  0.2.0  2026-11-12  CSV also holds needs_attention and recheck (columns appended at the end).
 
     runs/<YYYYmmdd_HHMMSS>/decisions.jsonl     one JSON object per decision (the message sent to the arm)
     runs/<...>/decisions.csv                   the same, flat, for a spreadsheet
@@ -18,7 +19,8 @@ import re
 import threading
 
 CSV_COLUMNS = ["time", "part_id", "shape", "face", "decision", "score", "threshold", "part_decision",
-               "reason", "warnings", "heatmap_path", "image_path", "sharpness", "angle_deg", "model"]
+               "reason", "warnings", "heatmap_path", "image_path", "sharpness", "angle_deg", "model",
+               "needs_attention", "recheck"]
 
 
 def safe_name(s):

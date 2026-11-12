@@ -2,6 +2,8 @@
 
 Changelog
   0.1.0  2026-11-12  first version.
+  0.2.0  2026-11-12  the reference remembers which lens calibration its pictures were corrected with (lens_id);
+                     numbers marked [chosen] (audit L7).
 
 Before a session (and every so often during it) the camera takes pictures of the EMPTY spot. Their
 average is the reference; how much they differ from each other is the camera's own noise. Both are
@@ -39,7 +41,8 @@ def _absdiff(frame, mean):
 
 
 class EmptyReference:
-    def __init__(self, mean, noise_level, local_ref, global_ref, n_frames, still_noise=None):
+    def __init__(self, mean, noise_level, local_ref, global_ref, n_frames, still_noise=None, lens_id=None):
+        self.lens_id = lens_id
         self.mean = mean.astype(np.float32)
         self.noise_level = float(noise_level)     # brightest pixel difference an empty frame shows
         self.local_ref = float(local_ref)         # biggest smoothed local change between empty frames
@@ -75,12 +78,12 @@ class EmptyReference:
         g = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY).astype(np.float32)
         hp = g - cv2.GaussianBlur(g, (0, 0), 2.0)
         sd = 1.4826 * np.median(np.abs(hp - np.median(hp))) * 1.6
-        return cls(mean, 4.0 * sd, 2.0 * sd, 0.5 * sd, 1)
+        return cls(mean, 4.0 * sd, 2.0 * sd, 0.5 * sd, 1)     # [chosen] factors for the one-frame fallback; not DOE
 
     def save(self, path):
         np.savez_compressed(path, mean=self.mean.astype(np.float16), meta=json.dumps(dict(
             noise_level=self.noise_level, local_ref=self.local_ref, global_ref=self.global_ref,
-            n_frames=self.n_frames, still_noise=self.still_noise)))
+            n_frames=self.n_frames, still_noise=self.still_noise, lens_id=self.lens_id)))
         return path
 
     @classmethod
@@ -88,7 +91,7 @@ class EmptyReference:
         z = np.load(path, allow_pickle=False)
         m = json.loads(str(z["meta"]))
         return cls(z["mean"].astype(np.float32), m["noise_level"], m["local_ref"], m["global_ref"], m["n_frames"],
-                   m.get("still_noise"))
+                   m.get("still_noise"), m.get("lens_id"))
 
     # ------------------------------------------------------------------------------------- part mask
     def difference(self, frame):
@@ -100,7 +103,7 @@ class EmptyReference:
         d = self.difference(frame)
         d8 = np.clip(d, 0, 255).astype(np.uint8)
         otsu, _ = cv2.threshold(d8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        t = max(float(otsu), self.noise_level * 1.0 + 1.0)
+        t = max(float(otsu), self.noise_level * 1.0 + 1.0)     # [chosen] +1 grey level above the noise; not DOE
         m = (d > t).astype(np.uint8)
         if near is not None and search_radius:
             win = np.zeros_like(m)
@@ -138,7 +141,7 @@ class EmptyReference:
         glob = abs(float(signed[keep].mean())) if keep.any() else 0.0
         # a floor of one grey level each: identical empty frames (a perfect simulator) would otherwise
         # give a zero limit and call every speck drift
-        llim = factor * max(self.local_ref, 1.0)
+        llim = factor * max(self.local_ref, 1.0)               # [chosen] floors 1.0 / 0.25 grey levels; not DOE
         glim = factor * max(self.global_ref, 0.25)
         reasons = []
         if local > llim:

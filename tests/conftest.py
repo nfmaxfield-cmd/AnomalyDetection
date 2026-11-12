@@ -2,6 +2,10 @@
 
 Changelog
   0.1.0  2026-11-12  first version.
+  0.2.0  2026-11-12  the simulator's default is now the HARD scene; these unit tests of single mechanisms
+                     (with small hand-made-feature models) pin the first build's EASY scene. The hard scene is
+                     tested on its own in test_hard_scene.py (pretrained backbone) and in the station tests
+                     that name it.
 
 Models in these tests use the hand-made features (fast, nothing to download). The pretrained ResNet-18
 is tested in test_model.py only when models/backbone/resnet18_l2l3.onnx exists (tools/get_backbone.py).
@@ -19,6 +23,8 @@ from qc import background as bgmod  # noqa: E402
 from qc import config as cfgmod  # noqa: E402
 from qc import features, sim  # noqa: E402
 from qc.model import NormalModel  # noqa: E402
+
+sim.DEFAULT_SCENE = "easy"          # unit tests of single mechanisms: the first build's scene (see changelog)
 
 BACKBONE_ONNX = os.path.join(ROOT, "models", "backbone", "resnet18_l2l3.onnx")
 
