@@ -61,8 +61,15 @@ def _robot_reason(excinfo):
     if excinfo is None:
         return None
     e = excinfo.value
-    if isinstance(e, ModuleNotFoundError) and (e.name or "").split(".")[0] in ROBOT_MODULES:
+    here = os.path.dirname(os.path.abspath(__file__))
+    name = (getattr(e, "name", None) or "").split(".")[0]
+    if isinstance(e, ModuleNotFoundError) and (name in ROBOT_MODULES or
+                                               (name == "app" and not os.path.isdir(os.path.join(here, "fleet")))):
         return "robot feature (switched off): needs module %s from alvik-fleet-capstone" % e.name
+    # "runs" etc. can resolve to an unrelated folder (e.g. the QC station's runs/ log folder) when the robot
+    # module is missing: the import works but has none of the robot functions
+    if isinstance(e, AttributeError) and any("module '%s' has no attribute" % m in str(e) for m in ROBOT_MODULES):
+        return "robot feature (switched off): %s" % e
     if isinstance(e, FileNotFoundError) and any(p in str(e).replace("\\", "/") for p in ROBOT_PATHS):
         return "robot feature (switched off): needs %s from alvik-fleet-capstone" % getattr(e, "filename", e)
     return None

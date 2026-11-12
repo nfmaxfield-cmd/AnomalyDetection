@@ -99,17 +99,24 @@ def burst_pick(ref, out):
     cv2.imwrite(os.path.join(out, "burst_sharpest_frame_pick.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
 
 
-def terminal(text_path, out_path, title):
+def terminal(text_path, out_path, title, head=22, tail=8, width=125):
+    """Terminal output as a picture: the first `head` and last `tail` lines, long lines wrapped."""
+    import textwrap
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    lines = open(text_path).read().rstrip().splitlines()
-    lines = lines[:60]
-    fig = plt.figure(figsize=(11, 0.19 * len(lines) + 0.8))
+    raw = [l for l in open(text_path).read().rstrip().splitlines() if l.strip()]
+    if len(raw) > head + tail:
+        raw = raw[:head] + ["   ... (%d lines left out) ..." % (len(raw) - head - tail)] + raw[-tail:]
+    lines = []
+    for l in raw:
+        lines += textwrap.wrap(l, width, subsequent_indent="    ") or [""]
+    h = 0.16 * (len(lines) + 2) + 0.3
+    fig = plt.figure(figsize=(11, h))
     fig.patch.set_facecolor("#1e1e1e")
-    fig.text(0.01, 0.99, title, color="#9cdcfe", family="monospace", fontsize=9, va="top")
-    fig.text(0.01, 0.99 - 0.35 / (0.19 * len(lines) + 0.8), "\n".join(lines), color="#e8e8e8", family="monospace",
-             fontsize=8, va="top")
+    fig.text(0.01, 1 - 0.12 / h, title, color="#9cdcfe", family="monospace", fontsize=9, va="top")
+    fig.text(0.01, 1 - 0.45 / h, "\n".join(lines), color="#e8e8e8", family="monospace", fontsize=8, va="top",
+             linespacing=1.35)
     fig.savefig(out_path, dpi=100, facecolor=fig.get_facecolor())
     plt.close(fig)
 

@@ -15,7 +15,7 @@ from held-out good scores plus 10-20 damaged parts; sharpest frame of a burst; J
 
 ## Data
 
-**What was built** (`qc/` package, 13 modules; command line `python -m qc ...`; details in Appendix B):
+**What was built** (`qc/` package, 19 Python files; command line `python -m qc ...`; details in Appendix B):
 empty reference and drift check, burst capture with sharpest-and-still frame, outline symmetry and
 straightening, ResNet-18 patch features through ONNX Runtime (no PyTorch), local and global memory banks,
 Gumbel-fit threshold with damaged-part cost balance, learning-curve tool, HTTP / stdin-stdout / file
@@ -63,7 +63,7 @@ parts even 5 good pictures suffice; *(Claude's)* this says the simulated parts v
 Nick's question, not that 5 real parts are enough. The estimate of 50-100 per shape and face stands until
 the tool is run on real pictures.
 
-**Tests:** QC suite 66 passed (including the pretrained-backbone test). Copied tools: Appendix D.
+**Tests:** QC suite 66 passed (including the pretrained-backbone test); copied tools 392 passed, 39 skipped (robot parts not copied, PyTorch), 2 expected failures (Appendix D). The README quick start ran unchanged in a fresh clone (picture: `docs/screenshots/2026-11-12/quickstart_terminal_output.png`).
 
 ## Conclusion
 
@@ -226,7 +226,20 @@ the labelling studio (`tools/label`, `tools/recognition`; a QC preset added, rob
 (`qc/clock.py`, from `outside.estimate_time_offset`), px-to-mm (`qc/calib.py`, from `floorcal.py`
 rectangle mode). New small QC labelling page (`tools/qclabel`).
 
-COPIED_TESTS
+Test runs in a fresh clone (2026-11-12, Python 3.13, OpenCV 5.0, no PyTorch):
+
+| suite | result |
+|---|---|
+| `python -m pytest` (QC) | 66 passed |
+| `python -m pytest tools/detector/tests tools/label/tests tools/recognition/tests` | 378 passed, 33 skipped, 2 expected failures |
+| `python -m pytest tools/tests` | 14 passed, 6 skipped |
+
+Skipped: tests needing PyTorch (3 detector test files not collected, 2 tests), parts of the robot project not
+copied (experiment scripts, dock files, fleet server, recorded clips), 4 tests written for the robot
+preset list (they pass with `QC_ROBOT_FEATURES=1`), and slow or video-dependent tests the source also skips.
+Expected failures: `test_augmented_picture_and_heading_agree` fails the same way in the source repository
+in this environment (checked); the other is marked so in the source. The copy itself changed no behaviour
+except the studio's preset list.
 
 ## Appendix E. Chosen numbers
 
