@@ -7,6 +7,7 @@ Changelog
                      with something in view; training-time empty), M2 (focus), M4 (backbone guard), M5 (collect
                      checks), M9 (mix-ups get a reason), L2 (parts counted), L3 (non-object JSON), L5 (threshold
                      reload, log pictures not overwritten).
+  0.2.1  2026-11-12  review: drift must exceed the training pictures' flicker too; collect keeps slight flicker.
 """
 import csv
 import io

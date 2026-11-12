@@ -86,10 +86,21 @@ reads returned 5 old frames of 8 after a pause; the reader thread and the buffer
 the camera does not keep is named (`camera_check_terminal.png`).
 
 **6. Install** (H7): `requirements.txt` now gives ranges; a fresh Python 3.11 environment installed and passed
-the whole QC suite (versions in Appendix D). Python 3.10 could not be tried here (no disk space for a second
-interpreter at the time).
+the whole QC suite (versions in Appendix D). Python 3.10 was not tried (the build machine ran out of disk
+space while fetching a second interpreter).
 
-**7. Tests**: QC suite TESTS_QC; copied tools TESTS_TOOLS (Appendix D).
+**7. Found in the fresh-clone review** (and fixed): on the hard scene, `collect-good` in the README quick
+start discarded 7 of 120 good pictures for "overall brightness changed" by about 1 grey level: the light's own
+frame-to-frame flicker, judged against a limit from only 10 empty pictures. With H1's rule the same false
+alarm in `run` would scrap good parts. Now a background change counts only when it also exceeds what the
+training pictures themselves showed, and collection keeps a picture whose whole-picture brightness moved
+slightly (noted). After the fix: 1 of 120 discarded (a change in one area just over its limit), and the quick
+start's 20 parts went 15 good accepted, 5 damaged rejected. The result tables above were made before this
+fix with the stricter rule; it only loosens a check that flagged no good test part there, so they stand.
+Pictures: `quickstart_hard_scene_collect_refusals_before_review_fix.png`, `quickstart_hard_scene_after_review_fix.png`.
+
+**8. Tests**: QC suite 123 passed in a fresh clone, on Python 3.13 and on Python 3.11 (pretrained backbone present); copied tools 378 passed, 33 skipped, 2 expected failures and 14 passed,
+6 skipped, as in the first build (Appendix D).
 
 ## Conclusion
 
@@ -148,10 +159,12 @@ interpreter at the time).
   scene the good parts' own handling marks (6-14 grey levels) are about as strong as a subtle scratch, so
   "subtle" misses there are partly by construction *(Claude's)*.
 - **Small samples**: 10 parts per defect type and severity per shape/face; differences of a few parts
-  between cells are within chance (95 % ranges in Appendix A).
+  between cells are within chance (95 % ranges under the results table in Data 1).
 - **Business numbers** typed in as placeholders: expected defect rate 5 %, false-reject cap 2 %, cost 10:1
   (`[chosen]`, no DOE: the team decides). Target 1 % from Nick, to be confirmed.
 - **Chosen numbers new in this build** (Appendix E), with whether a DOE should set them.
+- **Drift limits from the training pictures**: a picture with a stray object that slipped into the good folder
+  would widen them; collection refuses pictures with a change in one area, which limits that risk.
 - **Pretend camera**: old-frame and settings behaviour was tested with a fake OpenCV camera written from how
   UVC drivers usually behave, not with a real webcam.
 - **Lens calibration** was tested on simulated cards only; the simulated corner jitter (0.006 px) is far
@@ -246,6 +259,7 @@ Timing on the build machine (2 CPU cores): training 96-187 s per shape/face, 110
 | L6 fallback warning | fixed | Shown in the run window. | (manual) |
 | L7 rule gaps | fixed | Remaining numbers marked `[chosen]`; statistics explained in fine print at first use; the learning-curve sentence no longer shows a variable name. | |
 | L8 licences | nothing to fix | Guide: keep a copy of the backbone file. | |
+| Review (fresh clone): drift false alarms on the hard scene | fixed | Drift limits also from the training pictures' own flicker; collect keeps slight whole-picture brightness flicker (noted). | test_station_handoff (2) |
 | Added: lens calibration card (Nick, 12 Nov) | built | `make-card`, `calibrate-camera`, undistortion and mm scale behind `lens_correction` (inert without a calibration); models and the empty reference remember the calibration they were made with. | test_lens (7) |
 
 ## Appendix C. The threshold rule (H2, M8)
@@ -282,8 +296,8 @@ Python 3.12 or newer.
 
 | environment | what pip chose | QC suite |
 |---|---|---|
-| Python 3.11.18, fresh environment (Raspberry Pi OS Bookworm's version) | numpy 2.4.6, scipy 1.17.1, opencv 5.0.0, onnxruntime 1.31.1, onnx 1.23.2, matplotlib 3.11.2, pytest 9.2.0 | PY311_RESULT |
-| Python 3.13.18 (build machine) | numpy 2.5.3, scipy 1.18.1, opencv 5.0.0, onnxruntime 1.29.0, onnx 1.23.2, matplotlib 3.11.2, pytest 9.1.1 | PY313_RESULT |
+| Python 3.11.18, fresh environment (Raspberry Pi OS Bookworm's version) | numpy 2.4.6, scipy 1.17.1, opencv 5.0.0, onnxruntime 1.31.1, onnx 1.23.2, matplotlib 3.11.2, pytest 9.2.0 | 123 passed (fresh clone) |
+| Python 3.13.18 (build machine) | numpy 2.5.3, scipy 1.18.1, opencv 5.0.0, onnxruntime 1.29.0, onnx 1.23.2, matplotlib 3.11.2, pytest 9.1.1 | 123 passed (fresh clone) |
 
 Copied tools (Python 3.13): `python -m pytest tools/detector/tests tools/label/tests tools/recognition/tests`
 378 passed, 33 skipped, 2 expected failures; `python -m pytest tools/tests` 14 passed, 6 skipped (both as in
