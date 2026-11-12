@@ -1,0 +1,11 @@
+# generated data and models stay local (large); a few small example pictures live in docs/
+/data/
+/models/
+/runs/
+/outbox/
+/inbox/
+/qc_config.json
+__pycache__/
+*.pyc
+.pytest_cache/
+*.onnx

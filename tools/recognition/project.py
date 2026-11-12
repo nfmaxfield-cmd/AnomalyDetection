@@ -1,0 +1,565 @@
+# AnomalyDetection: copied from Nick's robot project, file tools/recognition/project.py (repository and commit: tools/COPIED.md).
+# Changelog (this repo): 2026-11-12 QC preset added (part + five defect types); the robot preset kept behind
+#   the robot_features switch (off).
+"""A recognition project: everything one labelling-and-training effort needs, in one folder.
+
+    <project>/
+      project.json        object types, recordings, model versions, current choices
+      labels/<rec id>/    labels.csv, review.json, frames/, cache/   (one per recording)
+      models/<vN>/        model.onnx, run/ (best.pt, split.json, log), train.log, meta.json
+      models/curve.json   every model (and "no model") scored on the same held-back frames
+      cameras/<name>.json camera models for sharing labels between cameras (optional)
+
+The recordings themselves stay where they are (they are large); project.json
+holds their paths. Copying a project to another computer: copy the folder and
+the recordings, then fix paths with `studio.py <project> --relink <new recordings folder>`.
+"""
+import csv
+import datetime as dt
+import json
+import os
+import re
+import threading
+import time
+import uuid
+
+VERSION = 1
+
+# Object type fields: name, has_front (the model learns a heading), size_px (None = measured),
+# height_cm (where the labelled point sits above the floor: used only to pass labels to the
+# second camera), height_varies (True: the height is not fixed, so the type is not passed
+# between cameras), note (where to mark it, shown to the person). Older projects lack the
+# last two; they read as False and "".
+# How each type moves, for the tracker (tools/label/tracker.py TrackerParams.from_types); each is
+# optional (missing or None: the usual setting for that kind of type): max_speed (object sizes per
+# second), can_be_carried (can jump to another place in someone's hand), can_sit_still (can stay put
+# for a long time: the tracker keeps following it by its look).
+MOTION_KEYS = ("max_speed", "can_be_carried", "can_sit_still")
+CATCH_ALL = "unknown"          # always kept: anything that is none of the other types
+CATCH_ALL_TYPE = dict(name=CATCH_ALL, has_front=False, size_px=None, height_cm=0.0, height_varies=True,
+                      note="anything else, or not sure what it is")
+
+# A new project starts with only the catch-all type; the first-start setup asks for the rest.
+DEFAULT_CLASSES = [dict(CATCH_ALL_TYPE)]
+
+# Ready-made sets of object types offered by the first-start setup.
+# AnomalyDetection (2026-11-12): the QC preset is offered; the robot preset is kept but offered only
+# when the robot features are switched on (QC_ROBOT_FEATURES=1, or "robot_features": true in qc_config.json).
+QC_PRESET = dict(id="qc", title="QC parts and defects", classes=[
+    dict(name="part", has_front=False, size_px=None, height_cm=0.0, height_varies=False,
+         note="the whole part: mark its middle"),
+    dict(name="scratch", has_front=False, size_px=None, height_cm=0.0, height_varies=False,
+         note="a line mark: mark the middle of the scratch"),
+    dict(name="chip", has_front=False, size_px=None, height_cm=0.0, height_varies=False,
+         note="a piece broken off an edge: mark the middle of the gap"),
+    dict(name="dent", has_front=False, size_px=None, height_cm=0.0, height_varies=False,
+         note="a dent or bump: mark its middle"),
+    dict(name="missing_corner", has_front=False, size_px=None, height_cm=0.0, height_varies=False,
+         note="a corner or side cut off: mark where the corner should be"),
+    dict(name="stain", has_front=False, size_px=None, height_cm=0.0, height_varies=False,
+         note="a discoloured patch: mark its middle"),
+    dict(CATCH_ALL_TYPE),
+])
+
+
+def robot_features_on():
+    """The switch for the kept robot features (off by default in the AnomalyDetection repo)."""
+    if os.environ.get("QC_ROBOT_FEATURES", "") == "1":
+        return True
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(os.getcwd(), "qc_config.json"),
+              os.path.join(os.path.dirname(os.path.dirname(here)), "qc_config.json")):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return bool(json.load(f).get("robot_features", False))
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+ROBOT_PRESETS = [
+    dict(id="alvik", title="Alvik robots", classes=[
+        dict(name="alvik", has_front=True, size_px=None, height_cm=4.0, height_varies=False,
+             note="the robot: mark the middle of its top"),
+        dict(name="person", has_front=False, size_px=None, height_cm=0.0, height_varies=True,
+             note="hands, arms, sometimes feet: mark the end reaching in"),
+        dict(CATCH_ALL_TYPE),
+    ]),
+]
+# switch on: exactly the robot project's presets first (as before), then the QC one; off: only the QC one
+PRESETS = (ROBOT_PRESETS + [QC_PRESET]) if robot_features_on() else [QC_PRESET]
+
+# Names the motion finder (tools/label/motion.py) gives its guesses, mapped to a project's types
+# by motion_class_map(): an object-sized blob, a big blob reaching in from the edge, other.
+REACHING_NAMES = ("hand", "person")
+
+# Bumped when the "what's new" screen for existing projects changes (2: robot logs, home positions,
+# AI helper, copy-paste, by situation, smarter tracking).
+WHATS_NEW_VERSION = 2
+
+
+def now_iso():
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def slug(s):
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(s)).strip("-.")
+    return s or "rec"
+
+
+def write_json(path, data):
+    """Write a JSON file so that a crash or a second writer never leaves half a file: every
+    write goes to its own temporary file, which is then swapped in. On Windows the swap fails
+    for a moment while another program has the file open, so it retries briefly."""
+    text = data if isinstance(data, str) else _dumps(data)
+    tmp = "%s.%s.tmp" % (path, uuid.uuid4().hex[:12])
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        for _ in range(15):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                time.sleep(0.2)
+        raise PermissionError("%s is open in another program; close it and try again" % path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _dumps(data):
+    """json.dumps that copes with another thread adding a key meanwhile (it tries again)."""
+    for k in range(20):
+        try:
+            return json.dumps(data, indent=1)
+        except RuntimeError:          # "dictionary changed size during iteration"
+            if k == 19:
+                raise
+            time.sleep(0.005)
+
+
+# One lock per project.json path, shared by every Project object of that folder: the studio's
+# routes and the trainer thread save the same file.
+_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path):
+    key = os.path.normcase(os.path.abspath(path))
+    with _LOCKS_GUARD:
+        if key not in _LOCKS:
+            _LOCKS[key] = threading.RLock()
+        return _LOCKS[key]
+
+
+class Project:
+    def __init__(self, folder, create_name=None):
+        self.folder = os.path.abspath(folder)
+        self.path = os.path.join(self.folder, "project.json")
+        self.lock = _lock_for(self.path)     # hold it to change project.json from more than one thread
+        if os.path.exists(self.path):
+            with open(self.path, encoding="utf-8") as f:
+                self.data = json.load(f)
+        elif create_name is not None:
+            os.makedirs(self.folder, exist_ok=True)
+            self.data = dict(version=VERSION, name=create_name or os.path.basename(self.folder), created=now_iso(),
+                             classes=[dict(c) for c in DEFAULT_CLASSES], recordings=[], models=[], cameras={},
+                             current=dict(rec=None, model="none"), settings=dict(train_minutes=20, block_s=30))
+            self.save()
+        else:
+            raise FileNotFoundError("No project.json in %s" % self.folder)
+        for d in ("labels", "models", "cameras"):
+            os.makedirs(os.path.join(self.folder, d), exist_ok=True)
+
+    # --- basics ---------------------------------------------------------------------------
+    def save(self):
+        with self.lock:
+            self.data["updated"] = now_iso()
+            write_json(self.path, _dumps(self.data))
+
+    @property
+    def name(self):
+        return self.data["name"]
+
+    @property
+    def classes(self):
+        return self.data["classes"]
+
+    def class_names(self):
+        return [c["name"] for c in self.classes]
+
+    def heading_classes(self):
+        return [c["name"] for c in self.classes if c.get("has_front")]
+
+    def class_heights(self):
+        """Height of each type's marked point above the floor (cm). A type whose height was left
+        blank reads as 0 here; it is never passed between cameras (see no_height_classes)."""
+        return {c["name"]: float(c.get("height_cm") or 0.0) for c in self.classes}
+
+    def varies_classes(self):
+        """Types whose height is not fixed: never passed between cameras."""
+        return [c["name"] for c in self.classes if c.get("height_varies")]
+
+    def no_height_classes(self):
+        """Types whose height was left blank (not known): not passed between cameras either."""
+        return [c["name"] for c in self.classes if not c.get("height_varies") and c.get("height_cm") is None]
+
+    def n_cameras(self):
+        """How many cameras the project's recordings come from (by camera name)."""
+        return len({self.camera_key(r) for r in self.recordings()})
+
+    def motion_class_map(self):
+        """The motion finder's guess names -> this project's types. Its object-sized blobs go to
+        the one plain type (or "alvik" in projects that have it), big blobs reaching in from the
+        edge to the hand/person type, everything else to the catch-all."""
+        names = self.class_names()
+        catch = CATCH_ALL if CATCH_ALL in names else None
+        reaching = next((n for n in REACHING_NAMES if n in names), None)
+        if reaching is None:
+            reaching = next((c["name"] for c in self.classes if c.get("height_varies") and c["name"] != CATCH_ALL), None)
+        plain = [n for n in names if n not in (CATCH_ALL, reaching)]
+        obj = "alvik" if "alvik" in names else (plain[0] if len(plain) == 1 else catch)
+        out = {"alvik": obj or catch, "hand": reaching or catch, "unknown": catch,
+               "machine": "machine" if "machine" in names else catch}
+        return {k: v for k, v in out.items() if v}
+
+    def motion_object_type(self):
+        """The type the motion finder's object-sized guesses get (the catch-all when the project has
+        several plain types: motion alone can't tell them apart)."""
+        return self.motion_class_map().get("alvik")
+
+    def loose_classes(self):
+        """Types the tracker lets move fast and end soon (hands, the catch-all, and anything
+        whose height varies)."""
+        return sorted(set(n for n in self.class_names() if n in REACHING_NAMES or n == CATCH_ALL)
+                      | set(self.varies_classes()))
+
+    # --- first start ---------------------------------------------------------------------------
+    def has_labels(self):
+        """True when any frame of any recording has been finished by a person or accepted."""
+        for r in self.recordings():
+            p = os.path.join(self.labels_dir(r["id"]), "review.json")
+            if os.path.exists(p):
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        if json.load(f).get("frames"):
+                            return True
+                except ValueError:
+                    continue
+        return False
+
+    def setup_view(self):
+        """What the page shows before labelling: the setup screen (a project that was never set
+        up and has no labels), or a one-time "what's new" (older projects that have labels)."""
+        st = self.data.setdefault("settings", {})
+        done = bool(st.get("setup_done"))
+        labelled = False if done else self.has_labels()
+        need_setup = not done and not labelled
+        seen = int(st.get("whats_new_seen") or 0)
+        whats_new = not need_setup and seen < WHATS_NEW_VERSION
+        # the "it varies" offer came with the first what's-new screen: made once only
+        offer_varies = [c["name"] for c in self.classes
+                        if c["name"] in ("hand", CATCH_ALL) and not c.get("height_varies")] if whats_new and seen < 1 else []
+        return dict(need_setup=need_setup, whats_new=whats_new, offer_varies=offer_varies,
+                    presets=PRESETS, catch_all=CATCH_ALL_TYPE)
+
+    def finish_setup(self, name=None, classes=None, seconds=None):
+        """Save the first-start setup: project name and object types (the catch-all is added
+        if missing)."""
+        if name is not None:
+            name = str(name).strip()
+            if not name:
+                raise ValueError("the project needs a name")
+            self.data["name"] = name[:80]
+        if classes is not None:
+            self.set_classes(classes, save=False)
+        st = self.data.setdefault("settings", {})
+        st["setup_done"] = True
+        st["whats_new_seen"] = WHATS_NEW_VERSION
+        if seconds is not None:
+            st["setup_seconds"] = round(float(seconds), 1)
+        st["setup_finished"] = now_iso()
+        self.save()
+
+    def finish_whats_new(self, set_varies=False):
+        """An older project confirmed the what's-new screen; with set_varies, hand and unknown
+        become "height varies"."""
+        changed = []
+        if set_varies:
+            for c in self.classes:
+                if c["name"] in ("hand", CATCH_ALL) and not c.get("height_varies"):
+                    c["height_varies"] = True
+                    changed.append(c["name"])
+        st = self.data.setdefault("settings", {})
+        st["setup_done"] = True
+        st["whats_new_seen"] = WHATS_NEW_VERSION
+        self.save()
+        return changed
+
+    # --- work area per camera --------------------------------------------------------------------
+    @staticmethod
+    def camera_key(rec):
+        """Work areas are kept per camera: by the recording's camera name, or "default" for
+        recordings added without one."""
+        return (rec.get("camera") or "").strip() or "default"
+
+    def camera_settings(self, key):
+        """project.json cameras[key]: work_area (corner points in image px, or None = whole
+        picture), margin_px (None = one object size), ignore_spots ([x, y, r] in px), asked
+        (the person has been offered to mark it)."""
+        c = (self.data.get("cameras") or {}).get(key) or {}
+        return dict(work_area=c.get("work_area"), margin_px=c.get("margin_px"),
+                    ignore_spots=list(c.get("ignore_spots") or []), asked=bool(c.get("asked")),
+                    image_size=c.get("image_size"))
+
+    def set_camera_settings(self, key, work_area=None, margin_px=None, ignore_spots=None, image_size=None,
+                            asked=True):
+        poly = None
+        if work_area:
+            poly = [[round(float(x), 1), round(float(y), 1)] for x, y in work_area]
+            if len(poly) < 3:
+                raise ValueError("a work area needs at least 3 corners")
+        spots = []
+        for s in ignore_spots or []:
+            x, y, r = (float(v) for v in s)
+            if r <= 0:
+                raise ValueError("an ignore spot needs a size")
+            spots.append([round(x, 1), round(y, 1), round(r, 1)])
+        m = None if margin_px in (None, "") else max(0.0, float(margin_px))
+        cams = self.data.setdefault("cameras", {})
+        cams[key] = dict(cams.get(key) or {}, work_area=poly, margin_px=m, ignore_spots=spots, asked=bool(asked),
+                         image_size=list(image_size) if image_size else None, updated=now_iso())
+        self.save()
+        return self.camera_settings(key)
+
+    # --- recordings -------------------------------------------------------------------------
+    def recordings(self):
+        return self.data["recordings"]
+
+    def rec(self, rid):
+        for r in self.recordings():
+            if r["id"] == rid:
+                return r
+        raise KeyError("no recording %r in this project" % rid)
+
+    def labels_dir(self, rid):
+        return os.path.join(self.folder, "labels", rid)
+
+    def add_recording(self, path, camera=None):
+        """Add a recording folder (with video.avi), or a two-camera session folder
+        (with session.json and one recording folder per camera). Returns the added ids."""
+        path = (path or "").strip().strip('"').strip()
+        if not path:
+            raise ValueError("Type or paste the recording folder first (the box is empty).")
+        path = os.path.abspath(os.path.expanduser(path))
+        if os.path.isfile(path):
+            raise ValueError("That is a file, not a recording folder: %s. A video file (mp4, mov, avi ...) is "
+                             "made into a recording by the studio's Add recording." % path)
+        if not os.path.isdir(path):
+            raise ValueError("There is no folder at %s." % path)
+        sess_file = os.path.join(path, "session.json")
+        found = []
+        if os.path.exists(sess_file):
+            with open(sess_file, encoding="utf-8") as f:
+                sess = json.load(f)
+            cams = sess.get("cameras") or []
+            for i, c in enumerate(cams):
+                sub = c.get("folder") or c.get("dir") or c.get("name")
+                folder = os.path.join(path, sub) if sub else None
+                if not folder or not os.path.exists(os.path.join(folder, "video.avi")):
+                    continue
+                found.append((folder, c.get("role") or c.get("name") or "cam%d" % i, os.path.basename(path)))
+            if not found:
+                raise ValueError("session.json lists no camera folders with a video.avi in %s" % path)
+        elif os.path.exists(os.path.join(path, "video.avi")):
+            found.append((path, camera or "", None))
+        else:
+            subs = sorted(d for d in os.listdir(path) if os.path.exists(os.path.join(path, d, "video.avi")))
+            if not subs:
+                raise ValueError("No video.avi in %s (give the recording folder from the Pi)" % path)
+            for d in subs:
+                found.append((os.path.join(path, d), camera or "", None))
+        have = {os.path.normcase(r["path"]) for r in self.recordings()}
+        ids = {r["id"] for r in self.recordings()}
+        added = []
+        for folder, cam, session in found:
+            if os.path.normcase(folder) in have:
+                continue
+            base = slug((session + "_" + cam) if session else os.path.basename(folder))
+            rid, k = base, 2
+            while rid in ids:
+                rid, k = "%s-%d" % (base, k), k + 1
+            ids.add(rid)
+            self.data["recordings"].append(dict(id=rid, path=folder, name=os.path.basename(session or folder),
+                                                camera=cam, session=session, added=now_iso()))
+            added.append(rid)
+        if added:
+            if not self.data["current"].get("rec"):
+                self.data["current"]["rec"] = added[0]
+            self.save()
+        return added
+
+    def relink(self, new_root):
+        """Point recordings at a new folder (after copying the project to another computer)."""
+        n = 0
+        for r in self.recordings():
+            if os.path.exists(r["path"]):
+                continue
+            parts = r["path"].replace("\\", "/").split("/")
+            for k in range(len(parts) - 1, 0, -1):
+                cand = os.path.join(new_root, *parts[k:])
+                if os.path.exists(os.path.join(cand, "video.avi")):
+                    r["path"] = cand
+                    n += 1
+                    break
+        self.save()
+        return n
+
+    # --- object types -----------------------------------------------------------------------
+    def used_classes(self):
+        used = set()
+        for r in self.recordings():
+            p = os.path.join(self.labels_dir(r["id"]), "labels.csv")
+            if os.path.exists(p):
+                with open(p, newline="", encoding="utf-8") as f:
+                    for row in csv.DictReader(f):
+                        if row.get("status") and row["status"] != "pending":
+                            used.add(row.get("cls", ""))
+        used.discard("none")
+        return used
+
+    def set_classes(self, classes, save=True):
+        """Replace the object types. The catch-all type ("unknown") is always kept: it is added
+        at the end when missing."""
+        classes = [dict(c) for c in classes]
+        names = [str(c.get("name", "")).strip() for c in classes]
+        if any(not n for n in names):
+            raise ValueError("every object type needs a name")
+        if CATCH_ALL not in names:
+            classes.append(dict(CATCH_ALL_TYPE))
+            names.append(CATCH_ALL)
+        if len(set(names)) != len(names):
+            raise ValueError("two object types have the same name")
+        if len(names) > 9:
+            raise ValueError("at most 9 object types (keys 1-9), including \"%s\"" % CATCH_ALL)
+        for n in names:
+            if not re.match(r"^[A-Za-z0-9_-]{1,32}$", n):
+                raise ValueError("object type %r: use letters, digits, - and _ only" % n)
+            if n.lower() == "none":
+                raise ValueError("\"none\" can't be a type name (it marks an empty frame in labels.csv)")
+        missing = self.used_classes() - set(names)
+        if missing:
+            raise ValueError("these types are used in confirmed labels and can't be removed or renamed: %s"
+                             % ", ".join(sorted(missing)))
+        out = []
+        for c in classes:
+            size = c.get("size_px")
+            varies = bool(c.get("height_varies"))
+            h = c.get("height_cm")
+            # blank height: not known (None), not "on the floor"; such a type isn't passed between cameras
+            h = None if h is None or (isinstance(h, str) and not h.strip()) else float(h)
+            if h is not None and h < 0:
+                raise ValueError("object type %r: the height can't be below the floor" % c["name"])
+            entry = dict(name=str(c["name"]).strip(), has_front=bool(c.get("has_front")),
+                         size_px=float(size) if size else None,
+                         height_cm=0.0 if varies and h is None else h,
+                         height_varies=varies, note=str(c.get("note") or "").strip()[:120])
+            sp = c.get("max_speed")
+            if sp not in (None, ""):
+                sp = float(sp)
+                if not sp > 0:
+                    raise ValueError("object type %r: the fastest speed must be above 0 (or blank for the usual)" % c["name"])
+                entry["max_speed"] = sp
+            for k in ("can_be_carried", "can_sit_still"):
+                v = c.get(k)
+                if isinstance(v, str):
+                    v = {"yes": True, "true": True, "no": False, "false": False}.get(v.strip().lower())
+                if v is not None:
+                    entry[k] = bool(v)
+            out.append(entry)
+        self.data["classes"] = out
+        if save:
+            self.save()
+
+    def type_settings(self):
+        """The object types with their motion settings, for the tracker (TrackerParams.from_types)."""
+        return [dict(name=c["name"], **{k: c.get(k) for k in MOTION_KEYS}) for c in self.classes]
+
+    def class_view(self):
+        used = self.used_classes()
+        return [dict(c, locked=c["name"] in used, height_varies=bool(c.get("height_varies")),
+                     note=c.get("note") or "", catch_all=c["name"] == CATCH_ALL) for c in self.classes]
+
+    # --- models -------------------------------------------------------------------------------
+    def models(self):
+        return self.data["models"]
+
+    def model(self, mid):
+        for m in self.models():
+            if m["id"] == mid:
+                return m
+        raise KeyError("no model %r" % mid)
+
+    def model_dir(self, mid):
+        return os.path.join(self.folder, "models", mid)
+
+    def new_model_id(self):
+        """v1, v2, ...: a deleted model's number is never given out again (the time record and
+        the learning curve name models by it)."""
+        used = [int(m["id"][1:]) for m in self.models() if re.match(r"^v\d+$", m["id"])]
+        n = 1 + max([0, int(self.data.get("settings", {}).get("last_model_n") or 0)] + used)
+        self.data.setdefault("settings", {})["last_model_n"] = n
+        return "v%d" % n
+
+    @staticmethod
+    def model_failed(m):
+        """A model that failed or was stopped, or one that was saved but finds nothing yet (marked
+        with a warning, or, for models trained before that warning existed, scored as finding no
+        objects at all)."""
+        if m.get("status") == "failed" or m.get("warning"):
+            return True
+        if m.get("status") != "ready":
+            return False
+        rec = (m.get("metrics") or {}).get("recall")
+        return (rec is not None and rec <= 0) or (m.get("val_f1") is not None and m["val_f1"] <= 0)
+
+    def delete_model(self, mid):
+        """Remove a failed or empty model: its folder, its entry, its point on the learning curve."""
+        import shutil
+        with self.lock:
+            m = self.model(mid)
+            if m.get("status") == "training":
+                raise ValueError("model %s is still training" % mid)
+            if not self.model_failed(m):
+                raise ValueError("model %s works; only failed models and models that find nothing can be deleted" % mid)
+            n = int(mid[1:]) if re.match(r"^v\d+$", mid) else 0
+            st = self.data.setdefault("settings", {})
+            st["last_model_n"] = max(int(st.get("last_model_n") or 0), n)
+            self.data["models"] = [x for x in self.models() if x["id"] != mid]
+            if self.data.get("current", {}).get("model") == mid:
+                self.data["current"]["model"] = "none"
+            self.save()
+            cp = os.path.join(self.folder, "models", "curve.json")
+            if os.path.exists(cp):
+                try:
+                    with open(cp, encoding="utf-8") as f:
+                        curve = json.load(f)
+                    pts = [p for p in curve.get("points", []) if p.get("model") != mid]
+                    if len(pts) != len(curve.get("points", [])):
+                        curve["points"] = pts
+                        write_json(cp, curve)
+                except (OSError, ValueError):
+                    pass
+        d = self.model_dir(mid)
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+
+    # --- cameras --------------------------------------------------------------------------------
+    def camera_model_path(self, camera):
+        return os.path.join(self.folder, "cameras", slug(camera) + ".json") if camera else None
