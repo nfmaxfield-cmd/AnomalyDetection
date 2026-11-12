@@ -12,7 +12,10 @@ Changelog
                      differs from the one the model was trained with; M2 focus check; M4 a model never
                      runs with another backbone; M5 collect refuses empty, moving, edge and drifted
                      pictures; M9 mix-up checks; L2 empty_every_parts counts parts; L5 thresholds reload
-                     when the file changes, log pictures are never overwritten.
+                     when the file changes, log pictures are never overwritten. Review fix: a background
+                     change makes a picture unsure only when it also exceeds what the training pictures
+                     showed (the empty pictures alone set the limit too tight on the hard scene); collect
+                     keeps a picture whose overall brightness moved slightly (noted).
 
 Folders (relative to the working folder, `root`):
   data/empty/            empty-spot pictures            data/good/<shape>/<face>/   good parts
@@ -89,6 +92,24 @@ def spread_limits(values):
         return None, None
     med = float(np.median(v))
     return float(v.min() - (med - v.min())), float(v.max() + (v.max() - med))
+
+
+def drift_beyond_training(m, d):
+    """The drift check's reasons that also exceed what the training pictures showed. The empty reference's
+    limits come from only ~10 empty pictures; the training pictures (50-100) show the scene's normal
+    frame-to-frame flicker better, so a change counts only when it is above both (found in the review:
+    the hard scene's light flicker of about 1 grey level was called "overall brightness changed")."""
+    meta = (m.meta or {}) if m is not None else {}
+    _, lhi = spread_limits(meta.get("train_drift_local", []))
+    _, ghi = spread_limits(meta.get("train_drift_global", []))
+    llim = max(d["local_limit"], lhi or 0.0)
+    glim = max(d["global_limit"], ghi or 0.0)
+    out = []
+    if d["local"] > llim:
+        out.append("something changed in one area (%.1f grey levels, limit %.1f)" % (d["local"], llim))
+    if d["global_"] > glim:
+        out.append("overall brightness changed (%.2f grey levels, limit %.2f)" % (d["global_"], glim))
+    return out
 
 
 def touches_edge(mask):
@@ -425,8 +446,10 @@ class Station:
             attn.append(("part was still moving (%.1f, limit %.1f)" % (info["motion"], info["motion_limit"]), True))
         drift = self.empty.drift(frame, exclude=loc.filled)
         if drift["drift"]:
-            attn.append(("background drift: " + "; ".join(drift["reasons"]), False))
-            self.log.event("drift", source="part", part_id=part_id, **drift)
+            reasons = drift_beyond_training(m, drift)
+            if reasons:
+                attn.append(("background drift: " + "; ".join(reasons), False))
+            self.log.event("drift", source="part", part_id=part_id, beyond_training=bool(reasons), **drift)
         vt = self.vs_training((shape, face))
         if vt:
             msg["warnings"].append(vt)
@@ -502,13 +525,21 @@ class Station:
         if touches_edge(loc.filled):
             return refuse("part touches the edge of the picture")
         drift = self.empty.drift(frame, exclude=loc.filled)
+        note = None
         if drift["drift"]:
-            return refuse("the backdrop or light changed (%s)" % "; ".join(drift["reasons"]))
+            if drift["local"] > drift["local_limit"]:
+                return refuse("something changed on the backdrop (%s)" % "; ".join(drift["reasons"]))
+            # only the whole picture's brightness moved a little: the light's own flicker; kept, and noted
+            note = "the light's brightness differed slightly (%s); picture kept" % "; ".join(drift["reasons"])
+            self.log.event("collect_note", part_id=part_id, note=note)
         d = self.path("data", "good", shape, face)
         os.makedirs(d, exist_ok=True)
         name = "%s_%s.png" % (dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f"), logmod.safe_name(part_id or "p"))
         cv2.imwrite(os.path.join(d, name), frame)
         n = len(glob.glob(os.path.join(d, "*.png")))
         self.log.event("collect", part_id=part_id, shape=shape, face=face, file=name, count=n)
-        return dict(ok=True, decision="accept", part_id=part_id, shape=shape, face=face, collected=n,
-                    file=os.path.join(d, name))
+        out = dict(ok=True, decision="accept", part_id=part_id, shape=shape, face=face, collected=n,
+                   file=os.path.join(d, name))
+        if note:
+            out["warnings"] = [note]
+        return out

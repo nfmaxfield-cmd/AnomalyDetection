@@ -6,7 +6,8 @@ Changelog
   0.2.0  2026-11-12  audit fixes (H3): --scene hard (default) or easy; a "faint" severity (quarter size and
                      contrast); the station's picture checks counted (a good part answered "unsure" is a
                      good part scrapped); threshold with the expected defect rate and false-reject cap;
-                     still runs against the first build's code (for before / after tables); peak memory.
+                     still runs against the first build's code (for before / after tables); peak memory;
+                     drift counted with the station's rule (above the training pictures' spread too).
 
     python tools/evaluate_synthetic.py --out docs/results/v0.2/hard --scene hard
     python tools/evaluate_synthetic.py --out docs/results/v0.2/easy --scene easy
@@ -71,7 +72,12 @@ def _checks(m, ref, frame, loc, s):
         from qc.station import picture_checks
     except ImportError:
         return []
-    out = ["drift"] if ref.drift(frame, exclude=loc.filled)["drift"] else []
+    try:
+        from qc.station import drift_beyond_training
+        d = ref.drift(frame, exclude=loc.filled)
+        out = ["drift"] if d["drift"] and drift_beyond_training(m, d) else []
+    except ImportError:             # the results in docs/results/v0.2 were made with the stricter empty-only rule
+        out = ["drift"] if ref.drift(frame, exclude=loc.filled)["drift"] else []
     return out + [k for k, _, _ in picture_checks(m, frame, loc, s, capture.sharpness(frame, loc.filled))]
 
 

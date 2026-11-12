@@ -7,7 +7,7 @@ Changelog
                      (M1, setting train_shifts_px); the backbone file's checksum is stored and checked
                      (M4: a model never runs with a different network than it was trained with);
                      training statistics kept for the station's checks (area, sharpness, alignment,
-                     M2 / M9); leave-one-out scores of the training pictures (M5).
+                     background change, M2 / M9); leave-one-out scores of the training pictures (M5).
 
 Training (good parts only):
   1. every training picture is straightened (straighten.py) against a reference picture of a good part,
@@ -176,6 +176,9 @@ class NormalModel:
         self.meta["train_area"] = [float(l.area) for _, l in locs]
         self.meta["train_sharpness"] = [capture.sharpness(f, l.filled) for f, l in locs]
         self.meta["train_contrast"] = [part_contrast(empty_ref, f, l) for f, l in locs]
+        drifts = [empty_ref.drift(f, exclude=l.filled) for f, l in locs]      # the scene's normal flicker
+        self.meta["train_drift_local"] = [float(d["local"]) for d in drifts]
+        self.meta["train_drift_global"] = [float(d["global_"]) for d in drifts]
         self.meta["frame_size"] = [int(locs[0][0].shape[1]), int(locs[0][0].shape[0])]
         return [(o["image"], o["mask"]) for o in outs]
 

@@ -314,3 +314,29 @@ def test_l5_threshold_reloads_and_log_pictures_are_not_overwritten(station):
     b = station.inspect_frame(sim.render("square", "top", seed=731)["frame"], "square", "top", "same")
     assert b["threshold"] == 0.01 and b["decision"] == "reject"
     assert a["heatmap_path"] != b["heatmap_path"] and os.path.exists(a["heatmap_path"])
+
+
+def test_review_drift_needs_to_exceed_the_training_spread_too():
+    from qc.station import drift_beyond_training
+
+    class M:
+        meta = {"train_drift_local": [3.0, 4.0, 5.0, 6.0], "train_drift_global": [0.3, 0.6, 0.9, 1.2]}
+    flicker = dict(local=5.5, local_limit=5.0, global_=1.0, global_limit=0.88)
+    assert drift_beyond_training(M(), flicker) == []                       # the scene's normal flicker
+    screw = dict(local=60.0, local_limit=5.0, global_=1.0, global_limit=0.88)
+    assert any("one area" in r for r in drift_beyond_training(M(), screw))
+    light = dict(local=5.0, local_limit=5.0, global_=4.0, global_limit=0.88)
+    assert any("brightness" in r for r in drift_beyond_training(M(), light))
+    assert drift_beyond_training(None, light)                              # no training data: empty limits only
+
+
+def test_review_collect_keeps_a_picture_whose_brightness_flickered(station, monkeypatch):
+    real = station.empty.drift
+
+    def flicker(frame, exclude=None, **kw):
+        d = real(frame, exclude=exclude, **kw)
+        d.update(drift=True, global_=d["global_limit"] * 1.2, reasons=["overall brightness changed (test)"])
+        return d
+    monkeypatch.setattr(station.empty, "drift", flicker)
+    r = station.collect("fl", "square", "top", frame=sim.render("square", "top", seed=740)["frame"])
+    assert r["ok"] and "kept" in r["warnings"][0]
