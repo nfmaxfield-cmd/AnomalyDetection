@@ -11,6 +11,8 @@ Public repo (MIT). Built by Nick Maxfield (URI systems engineering) for Dr. Sodh
   the like are worked out from the station's own pictures (held-out good parts, damaged parts, empty
   frames), never typed in as a fixed number. Where a number had to be chosen, mark it `[chosen]` in the
   code and say in the build report whether a designed experiment (DOE) should set it instead.
+- **Josh and Chris's own AI** follows `josh-and-chris/AGENTS.md` instead (it helps them on the real station);
+  the rules below are for Nick's build agents. Answer questions left in `josh-and-chris/questions/` in the same file.
 - **Agents test offline only.** Use the computer-generated pictures (`qc/sim.py`, `--simulate`) and the
   pytest suites. Never drive a real camera, arm, robot or Raspberry Pi, and never SSH anywhere.
   Run: `python -m pytest` (QC), `python -m pytest tools/detector/tests tools/label/tests tools/recognition/tests`

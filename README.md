@@ -9,6 +9,7 @@ Maxfield (URI systems engineering) for Dr. Sodhi's Machine Vision team (Josh S a
 public under the MIT licence.
 
 **Start here:** [docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md) (step by step, for the station).
+Josh and Chris (and your AI): [josh-and-chris/](josh-and-chris/README.md) holds the build outline, instructions for your AI, and the questions channel to Nick.
 Current results, limits and what the independent audit changed: [docs/build-reports/2026-11-12-audit-fixes.md](docs/build-reports/2026-11-12-audit-fixes.md)
 (first build: [docs/build-reports/2026-11-12-first-build.md](docs/build-reports/2026-11-12-first-build.md)).
 
